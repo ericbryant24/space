@@ -272,7 +272,15 @@ function paint(
     if (recordable && hitR >= HIT_MIN_PX && stats.hits.length < (recordAllHits ? 8000 : 600)) {
       stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR, trueRPx });
     }
-    if (hitR >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
+    /**
+     * Orbital bodies are named at ANY size. A system holds under ten planets drawn as four-pixel dots on a
+     * chart, and an unlabelled dot is the one thing on screen you cannot tell anything about -- naming them
+     * is the whole difference between an orbital diagram and a scatter of pixels. Scattered stars are
+     * excluded by the same test: there are a couple of thousand of those, and a couple of thousand names is
+     * not a chart.
+     */
+    const orbital = schematic && frame.scatterParentPx === 0;
+    if ((orbital || hitR >= LABEL_MIN_PX) && stats.labels < LABEL_BUDGET) {
       drawLabel(frame, node, sx, sy, hitR);
       stats.labels++;
     }
@@ -694,6 +702,33 @@ export { frameToNode };
  * Without it there is no way to tell that anything is a target: a planet in a system view is a four-pixel
  * dot, and "click to fly" in the hint bar does not help if you cannot see what is clickable.
  */
+/**
+ * The lock marker: crosshair arms reaching in towards the thing the view is following.
+ *
+ * Distinct from the hover reticle on purpose. Hover is a ring that pulses AROUND something, meaning "this
+ * is a target"; the lock is four arms pointing IN at something dead centre, meaning "the view is holding
+ * on to this". Nothing says so in words, because the behaviour says it: the marker sits still while the
+ * rest of the sky slides past it.
+ */
+export function drawLock(ctx: CanvasRenderingContext2D, hit: HitEntry, name: string): void {
+  const r = Math.max(hit.rPx, 13) + 8;
+  ctx.save();
+  ctx.strokeStyle = 'rgba(255, 209, 102, 0.85)';
+  ctx.lineWidth = 2;
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2;
+    const cos = Math.cos(a);
+    const sin = Math.sin(a);
+    ctx.beginPath();
+    ctx.moveTo(hit.xPx + cos * (r + 13), hit.yPx + sin * (r + 13));
+    ctx.lineTo(hit.xPx + cos * r, hit.yPx + sin * r);
+    ctx.stroke();
+  }
+  // Clear of the top arm, which reaches to r + 13.
+  drawNameTag(ctx, name, hit.xPx, hit.yPx - r - 37, 1);
+  ctx.restore();
+}
+
 export function drawHover(
   ctx: CanvasRenderingContext2D,
   hit: HitEntry,
@@ -718,23 +753,31 @@ export function drawHover(
     ctx.stroke();
   }
 
-  const label = name;
+  drawNameTag(ctx, name, hit.xPx, hit.yPx - r - 26, 0.35);
+  ctx.restore();
+}
+
+/** A name on a rounded plate. The one piece of text the pointer is allowed to put on the canvas. */
+function drawNameTag(
+  ctx: CanvasRenderingContext2D,
+  label: string,
+  cx: number,
+  top: number,
+  edge: number,
+): void {
   ctx.font = '700 12.5px Nunito, ui-sans-serif, system-ui, sans-serif';
   const w = ctx.measureText(label).width;
-  const bx = hit.xPx - w / 2 - 7;
-  const by = hit.yPx - r - 26;
   ctx.fillStyle = 'rgba(10, 13, 24, 0.82)';
-  roundRect(ctx, bx, by, w + 14, 20, 10);
+  roundRect(ctx, cx - w / 2 - 7, top, w + 14, 20, 10);
   ctx.fill();
-  ctx.strokeStyle = 'rgba(255, 209, 102, 0.35)';
+  ctx.strokeStyle = `rgba(255, 209, 102, ${edge})`;
   ctx.lineWidth = 1;
-  roundRect(ctx, bx, by, w + 14, 20, 10);
+  roundRect(ctx, cx - w / 2 - 7, top, w + 14, 20, 10);
   ctx.stroke();
   ctx.fillStyle = '#ffd166';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';
-  ctx.fillText(label, hit.xPx, by + 10.5);
-  ctx.restore();
+  ctx.fillText(label, cx, top + 10.5);
 }
 
 function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {

@@ -34,13 +34,6 @@
   }
   .hud .name { font-size: 16px; font-weight: 800; letter-spacing: -0.01em; }
   .hud .sub { font-size: 11.5px; opacity: 0.55; margin-bottom: 7px; max-width: 34ch; line-height: 1.4; }
-  .hud .lore {
-    font-size: 12.5px;
-    line-height: 1.5;
-    margin: 6px 0 8px;
-    max-width: 30ch;
-    color: rgba(242, 236, 221, 0.86);
-  }
   .hud .rows { font: 11.5px/1.7 ui-monospace, "Space Mono", SFMono-Regular, Menlo, monospace; }
   .hud .rows > div { white-space: nowrap; }
   .dim { color: rgba(242, 236, 221, 0.4); }
@@ -96,32 +89,10 @@
     border: 1.5px solid rgba(242, 236, 221, 0.8);
     border-top: none;
   }
-  .hint b { color: #ffd166; font-weight: 700; }
-  .hint {
-    position: absolute;
-    left: 50%;
-    bottom: 22px;
-    transform: translateX(-50%);
-    padding: 7px 15px;
-    border-radius: 999px;
-    background: var(--panel);
-    border: 1px solid var(--hair);
-    font-size: 12.5px;
-    color: rgba(242, 236, 221, 0.68);
-    white-space: nowrap;
-    max-width: 92vw;
-    overflow: hidden;
-    text-overflow: ellipsis;
-  }
   @media (max-width: 720px) {
     .hud { min-width: 0; font-size: 11px; }
     .hud .rows { display: none; }
-    .hint b { color: #ffd166; font-weight: 700; }
-  .hint { font-size: 11.5px; }
-  }
-</style>
+  </style>
 <canvas id="view"></canvas>
-<div id="overlay">
-  <div class="hint">scroll to zoom &middot; drag to pan &middot; <b>hover anything, then scroll or click to travel to it</b> &middot; Backspace to rise</div>
-</div>
+<div id="overlay"></div>
 <script type="module" src="/src/main.ts"></script>

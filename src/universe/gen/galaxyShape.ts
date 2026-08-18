@@ -89,7 +89,15 @@ function buildShape(id: number): GalaxyShape {
     barLength: 0.18 + r('barLength') * 0.2,
     barWidth: 0.06 + r('barWidth') * 0.06,
 
-    ellipticity: morphology === 'lenticular' ? 0.55 + r('ellip') * 0.25 : r('ellip') * 0.7,
+    /**
+     * TRUE 2D: only an actually-elliptical galaxy is elliptical.
+     *
+     * Every other morphology used to get an ellipticity too, and squashing a spiral is not a shape, it is
+     * a disc seen at an angle -- a statement that the galaxy is tilted away from you in a third dimension
+     * this project does not have. Discs are drawn face-on and circular now. `tilt` stays, because rotating
+     * a shape within the plane is a shape, not a projection.
+     */
+    ellipticity: morphology === 'elliptical' || morphology === 'irregular' ? r('ellip') * 0.55 : 0,
     bands: 3 + Math.floor(r('bands') * 3),
     tilt: r('tilt') * Math.PI,
     dustLanes: Math.floor(r('dust') * 4),

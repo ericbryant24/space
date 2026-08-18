@@ -1,4 +1,4 @@
-import { phase, simTime } from '../../core/clock.ts';
+import { simTime } from '../../core/clock.ts';
 import { f01, hash2, hash3 } from '../../core/rng.ts';
 import { isGiant, type PlanetClass, type PlanetTraits } from '../../universe/gen/planet.ts';
 import { outlineWidth } from '../bands.ts';
@@ -103,7 +103,16 @@ function blobPath(
   ctx.closePath();
 }
 
-/** Continents, drawn in the same rotating longitude frame the surface will eventually use. */
+/**
+ * Continents, flat, on the face you are looking at.
+ *
+ * TRUE 2D. This used to be an orthographic projection of a sphere: continents were placed by longitude,
+ * squashed by cos(lon) towards the limb, culled when they went round the back, and drifted with the
+ * planet's day length. Every one of those is a three-dimensional claim, and together they made a planet
+ * read as a rendered ball rather than as a thing on a map. A planet has ONE SET FACE now: land sits at a
+ * fixed place on the disc, at its true size wherever it falls, and it stays there. It also stays there
+ * while you aim at it, which is the other half of why this changed.
+ */
 function paintContinents(
   ctx: CanvasRenderingContext2D,
   cx: number,
@@ -113,37 +122,32 @@ function paintContinents(
   id: number,
   s: Surface,
 ): void {
-  const count = 4 + Math.floor(f01(hash2(id, 0x31)) * 6);
-  const spin = (t.retrograde ? -1 : 1) * phase(t.dayLength) * Math.PI * 2;
+  const count = 5 + Math.floor(f01(hash2(id, 0x31)) * 7);
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.clip();
   for (let i = 0; i < count; i++) {
-    const lon = f01(hash3(id, 0x32, i)) * Math.PI * 2 + spin;
-    const lat = (f01(hash3(id, 0x33, i)) * 2 - 1) * 0.85;
-    // Orthographic: a continent on the far side is simply off-disc.
-    const px = Math.sin(lon) * Math.cos(lat * 1.2);
-    if (Math.cos(lon) < -0.15) continue;
-    const py = lat;
-    const size = r * (0.16 + f01(hash3(id, 0x34, i)) * 0.3) * (1 - t.waterFraction * 0.45);
-    // Squash towards the limb, which is all the sphericity a cartoon needs.
-    const squash = Math.max(0.15, Math.cos(lon));
-    ctx.save();
-    ctx.translate(cx + px * r, cy + py * r);
-    ctx.scale(squash, 1);
-    blobPath(ctx, 0, 0, size, hash3(id, 0x35, i));
+    /**
+     * Golden angle, not a free roll, for the bearing -- and sqrt for the distance so the disc fills evenly
+     * instead of piling up in the middle. Placed at random, half a dozen continents at these sizes landed
+     * on top of each other and merged into one lump filling the planet; spread this way they read as
+     * separate landmasses on a world, which is the whole point of drawing more than one.
+     */
+    const a = i * 2.39996 + f01(hash3(id, 0x32, i)) * 0.8;
+    const d = Math.sqrt((i + 0.55) / count) * 0.74;
+    const size = r * (0.1 + f01(hash3(id, 0x34, i)) * 0.17) * (1 - t.waterFraction * 0.5);
+    blobPath(ctx, cx + Math.cos(a) * d * r, cy + Math.sin(a) * d * r, size, hash3(id, 0x35, i));
     ctx.fillStyle = css(s.land);
     ctx.fill();
-    // A coastline in ink, not black: the outline is what makes flat fills read as drawn rather than as
-    // an untextured 3D render. Width is corrected for the squash so it stays even around the limb.
+    // A coastline in ink, not black: the outline is what makes flat fills read as drawn rather than as an
+    // untextured render.
     const w = outlineWidth(size, 2);
     if (w > 0) {
-      ctx.lineWidth = w / squash;
+      ctx.lineWidth = w;
       ctx.strokeStyle = css(s.coast, 0.85);
       ctx.stroke();
     }
-    ctx.restore();
   }
   ctx.restore();
 }
@@ -188,16 +192,26 @@ function paintBands(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: nu
   ctx.restore();
 }
 
+/**
+ * Ice, as a flat cap across the top and the bottom of the disc.
+ *
+ * Poles are at the top and bottom of a face-on disc, which is the one piece of sphere geometry that
+ * survives into a flat drawing without implying depth: a lens-shaped band across each end, clipped, with
+ * a wobbly inner boundary so it reads as ice rather than as a crop.
+ */
 function paintCaps(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, id: number, s: Surface): void {
   if (t.snowIndex <= 0.02) return;
-  const capLat = 1 - Math.min(0.95, 0.62 * t.snowIndex + 0.08);
+  // How far down from each pole the ice reaches, as a fraction of the radius.
+  const reach = Math.min(0.92, 0.14 + 0.72 * t.snowIndex);
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.clip();
   ctx.fillStyle = css(s.ice, 0.95);
   for (const sign of [-1, 1]) {
-    blobPath(ctx, cx, cy + sign * r * (capLat + 0.55), r * 0.85, hash3(id, 0x51, sign), 9, 0.14);
+    // A blob wider than the disc, centred beyond the pole, so what lands inside the clip is a cap with a
+    // wobbly edge and a clean straight rim.
+    blobPath(ctx, cx, cy + sign * r * (2 - reach), r * 1.55, hash3(id, 0x51, sign), 13, 0.1);
     ctx.fill();
     const w = outlineWidth(r * 0.85, 1.6);
     if (w > 0) {
@@ -209,47 +223,33 @@ function paintCaps(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: num
   ctx.restore();
 }
 
+/**
+ * Cloud, drifting.
+ *
+ * The drift is a slow back-and-forth rather than a wrap all the way round, because a cloud sliding off one
+ * limb and reappearing at the other is a rotation cue, and this planet does not turn. It is still the
+ * single cheapest thing on screen that makes a world feel alive.
+ */
 function paintClouds(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, id: number, s: Surface): void {
   if (t.cloudCover <= 0.04) return;
-  const count = 2 + Math.floor(t.cloudCover * 4);
+  const count = 3 + Math.floor(t.cloudCover * 7);
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.clip();
-  ctx.fillStyle = css(s.cloud, 0.42 + t.cloudCover * 0.3);
+  ctx.fillStyle = css(s.cloud, 0.4 + t.cloudCover * 0.28);
   for (let i = 0; i < count; i++) {
-    const lat = (f01(hash3(id, 0x61, i)) * 2 - 1) * 0.75;
-    // Clouds drift and wrap. This single animation does more for "alive" than anything else here.
-    const speed = 0.05 + f01(hash3(id, 0x62, i)) * 0.09;
-    const x = (((simTime() * speed + f01(hash3(id, 0x63, i))) % 2) - 1) * 1.6;
-    const w = r * (0.3 + f01(hash3(id, 0x64, i)) * 0.45);
-    const h = r * (0.05 + f01(hash3(id, 0x65, i)) * 0.07);
+    // Spread across the disc rather than stacked: two wide ellipses at the same height read as one painted
+    // stripe, which is the last thing a sky should look like.
+    const lat = ((i + 0.5) / count) * 1.6 - 0.8 + (f01(hash3(id, 0x61, i)) - 0.5) * 0.18;
+    const period = 90 + f01(hash3(id, 0x62, i)) * 140;
+    const x = Math.sin((simTime() / period) * Math.PI * 2 + f01(hash3(id, 0x63, i)) * Math.PI * 2) * 0.42;
+    const w = r * (0.16 + f01(hash3(id, 0x64, i)) * 0.26);
+    const h = r * (0.04 + f01(hash3(id, 0x65, i)) * 0.05);
     ctx.beginPath();
     ctx.ellipse(cx + x * r, cy + lat * r, w, h, 0, 0, Math.PI * 2);
     ctx.fill();
   }
-  ctx.restore();
-}
-
-/**
- * The terminator, and the one trick worth spelling out: a hard-edged crescent made with nonzero
- * winding. Fill the disc's bounding box, subtract an offset ellipse traced in the opposite direction,
- * and clip to the disc. No feather, no gradient.
- */
-function paintTerminator(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, s: Surface): void {
-  const light = t.starLight;
-  const lx = Math.cos(light.azimuth);
-  const ly = Math.sin(light.azimuth);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.beginPath();
-  ctx.rect(cx - r * 1.2, cy - r * 1.2, r * 2.4, r * 2.4);
-  ctx.ellipse(cx + lx * r * 0.55, cy + ly * r * 0.55, r * 1.05, r * 1.05, 0, 0, Math.PI * 2, true);
-  // Night is genuinely dark. A timid terminator reads as a smudge rather than as a day/night line.
-  ctx.fillStyle = css(shade(s.sea, light.shadowHue, 1), 0.74);
-  ctx.fill();
   ctx.restore();
 }
 
@@ -264,8 +264,6 @@ export function drawPlanet(
   const s = surfaceColours(t);
   const light = t.starLight;
 
-  if (t.hasRings) paintRings(ctx, cx, cy, r, t, s, false);
-
   // Disc.
   ctx.fillStyle = css(s.sea);
   ctx.beginPath();
@@ -279,39 +277,53 @@ export function drawPlanet(
     paintCaps(ctx, cx, cy, r, t, id, s);
   }
   paintClouds(ctx, cx, cy, r, t, id, s);
-  paintTerminator(ctx, cx, cy, r, t, s);
 
-  // Rim light on the star side: one arc, flat, no glow.
-  if (r > 8) {
-    ctx.lineWidth = Math.max(1, r * 0.045);
-    ctx.strokeStyle = css(atLuminance(light.colour, 0.86), 0.6);
-    ctx.beginPath();
-    ctx.arc(cx, cy, r - ctx.lineWidth * 0.5, light.azimuth - 1.2, light.azimuth + 1.2);
-    ctx.stroke();
-  }
+  /**
+   * NO TERMINATOR AND NO RIM LIGHT.
+   *
+   * There used to be a hard-edged day/night crescent here -- the cleverest drawing in the file, and the
+   * reason a planet read as a rendered ball. A lit crescent and a lit limb are statements about a sphere
+   * under a light, and this is a flat map: a circle with one set face, and everything that happens on it
+   * happening in plain view. The star's identity still reaches every colour on the disc through the tint
+   * in `surfaceColours`, which is where it belongs.
+   */
 
-  // Cartoon atmosphere: an offset outline, not a fog. Capped, because scaling it with the radius gave
-  // a ten-pixel grey rim that read as the edge of a dinner plate.
+  // Cartoon atmosphere: an offset outline, not a fog. Capped, because scaling it with the radius gave a
+  // ten-pixel grey rim that read as the edge of a dinner plate.
   if (t.atmDensity > 0.15 && r > 5) {
-    ctx.lineWidth = Math.min(4, Math.max(1, r * 0.02)) * Math.min(1, t.atmDensity);
-    ctx.strokeStyle = css({ h: t.atmHue, s: 0.5, l: 0.7 }, 0.35);
+    // Kept lighter than the silhouette: the ink line is the planet's edge, and a heavier grey ring outside
+    // it stole the read.
+    ctx.lineWidth = Math.min(2.5, Math.max(1, r * 0.016)) * Math.min(1, t.atmDensity);
+    ctx.strokeStyle = css({ h: t.atmHue, s: 0.5, l: 0.7 }, 0.3);
     ctx.beginPath();
     ctx.arc(cx, cy, r + ctx.lineWidth, 0, Math.PI * 2);
     ctx.stroke();
   }
 
-  if (t.hasRings) paintRings(ctx, cx, cy, r, t, s, true);
-
-  const w = outlineWidth(r, 2.5);
+  // The thick cartoon line, and the whole of the planet's silhouette. In INK -- `s.coast`, a very dark
+  // tinted neutral -- and not a hue-rotated sea colour, which over a warm star came out bright red and read
+  // as a highlighter ring drawn round the planet rather than as the edge of it.
+  const w = outlineWidth(r, 3);
   if (w > 0) {
     ctx.lineWidth = w;
-    ctx.strokeStyle = css(shade(s.sea, light.shadowHue, 1.4), 0.8);
+    ctx.strokeStyle = css(s.coast, 0.95);
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();
   }
+
+  // Rings last, because face-on they pass over nothing: they are rings AROUND the planet, not across it.
+  if (t.hasRings) paintRings(ctx, cx, cy, r, t, s);
 }
 
+/**
+ * Rings, as concentric circles around the disc.
+ *
+ * Edge-on ellipses were the last sphere cue in the file: a tilted hoop only makes sense if you are looking
+ * at a ball from the side, and it needed a behind-half and an in-front-half painted either side of the
+ * planet to sell it. Face-on, rings are what they actually are from above -- rings -- and they no longer
+ * cross the face, so nothing is hidden and there is no front and back to get right.
+ */
 function paintRings(
   ctx: CanvasRenderingContext2D,
   cx: number,
@@ -319,32 +331,24 @@ function paintRings(
   r: number,
   t: PlanetTraits,
   s: Surface,
-  front: boolean,
 ): void {
-  // Rings are ice a few tens of metres thick seen edge-on: delicate, not slabs of plastic. Four thin
-  // bands with real gaps between them, at low alpha, read as rings; three fat opaque ones read as a
-  // toy hoop.
+  // Ice a few tens of metres thick: delicate, not slabs of plastic. Four thin bands with real gaps between
+  // them read as rings; three fat opaque ones read as a toy hoop.
   const inner = r * 1.28;
   const outer = inner + r * (0.3 + t.ringWidth * 0.55);
-  const ry = t.ringTilt;
   const bands = 4;
   const tones = [s.cloud, s.ice, s.landShade, s.ice];
-  ctx.save();
-  ctx.translate(cx, cy);
+  const slot = (outer - inner) / bands;
   for (let i = 0; i < bands; i++) {
-    const slot = (outer - inner) / bands;
     const a = inner + slot * i;
     const b = a + slot * 0.56;
     ctx.beginPath();
-    ctx.ellipse(0, 0, b, b * ry, 0, front ? 0 : Math.PI, front ? Math.PI : Math.PI * 2);
-    ctx.ellipse(0, 0, a, a * ry, 0, front ? Math.PI : Math.PI * 2, front ? 0 : Math.PI, true);
-    ctx.closePath();
-    // The near half is translucent: it passes in front of the planet, and an opaque band there
-    // reads as a scratch across the disc rather than as ice.
-    ctx.fillStyle = css(tones[i % tones.length]!, front ? 0.3 : 0.34);
+    ctx.arc(cx, cy, b, 0, Math.PI * 2);
+    // Traced the other way, so the winding rule leaves an annulus rather than a filled disc.
+    ctx.arc(cx, cy, a, 0, Math.PI * 2, true);
+    ctx.fillStyle = css(tones[i % tones.length]!, 0.34);
     ctx.fill();
   }
-  ctx.restore();
 }
 
 /**
@@ -384,25 +388,20 @@ export function drawPlanetIcon(
 ): number {
   const r = Math.max(PLANET_ICON_MIN_PX, truePx);
   if (r <= 7) {
-    // Too small for any of the detail to survive. A flat disc, a lit crescent, and a dark rim: enough
-    // to read as a body on a diagram rather than as another star in the field behind it.
+    // Too small for any of the detail to survive: a flat disc in the world's own colour, a smaller disc of
+    // its land, and a dark rim. Enough to read as a body on a chart rather than as another star in the
+    // field behind it -- and no lit crescent, which is the sphere cue this whole pass exists to remove.
     const s = surfaceColours(t);
-    ctx.fillStyle = css(s.land);
+    ctx.fillStyle = css(s.sea);
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.fill();
-    ctx.fillStyle = css(atLuminance(t.starLight.colour, 0.82), 0.55);
+    ctx.fillStyle = css(s.land, 0.9);
     ctx.beginPath();
-    ctx.arc(
-      cx + Math.cos(t.starLight.azimuth) * r * 0.33,
-      cy + Math.sin(t.starLight.azimuth) * r * 0.33,
-      r * 0.55,
-      0,
-      Math.PI * 2,
-    );
+    ctx.arc(cx, cy, r * 0.52, 0, Math.PI * 2);
     ctx.fill();
     ctx.lineWidth = 1;
-    ctx.strokeStyle = css(shade(s.sea, t.starLight.shadowHue, 1.5), 0.85);
+    ctx.strokeStyle = css(s.coast, 0.95);
     ctx.beginPath();
     ctx.arc(cx, cy, r, 0, Math.PI * 2);
     ctx.stroke();

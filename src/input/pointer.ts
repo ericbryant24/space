@@ -11,6 +11,9 @@ export interface InputState {
   velX: number;
   velY: number;
   onClick: ((x: number, y: number) => void) | null;
+  onDoubleClick: ((x: number, y: number) => void) | null;
+  /** Fired when the user drags the view sideways. Pinch-zoom does not count: zooming is not looking away. */
+  onPan: (() => void) | null;
   /**
    * Called on every zoom-in gesture. Lets navigation decide whether the cursor is over something worth
    * travelling to, rather than zooming into the gap beside it.
@@ -40,6 +43,8 @@ export function createInput(cam: Camera): InputState {
     velX: 0,
     velY: 0,
     onClick: null,
+    onDoubleClick: null,
+    onPan: null,
     onZoomIntent: null,
     cancelZoom(): void {
       this.zTarget = cam.z;
@@ -142,11 +147,25 @@ export function attachInput(
     lastX = p.x;
     lastY = p.y;
     moved += Math.abs(dx) + Math.abs(dy);
+    if (dx !== 0 || dy !== 0) input.onPan?.();
     panByScreen(cam, dx, dy);
     input.velX = dx;
     input.velY = dy;
     wake();
   });
+
+  /**
+   * A single click travels to a thing; a double click locks the view onto it. So the single click has to
+   * WAIT to find out which it is -- fire it immediately and every double click also launches a flight that
+   * has to be cancelled a moment later, and the view lurches. A flight takes a couple of seconds anyway,
+   * so a fifth of a second of held breath before it starts is not something you can feel.
+   */
+  const DOUBLE_MS = 210;
+  const DOUBLE_SLOP_PX = 24;
+  let pendingClick: ReturnType<typeof setTimeout> | null = null;
+  let lastTapAt = -Infinity;
+  let lastTapX = 0;
+  let lastTapY = 0;
 
   const release = (e: PointerEvent) => {
     pointers.delete(e.pointerId);
@@ -154,8 +173,29 @@ export function attachInput(
     if (pointers.size === 0) {
       input.dragging = false;
       const p = local(e);
-      if (moved < 6 && Math.abs(p.x - downX) < 6 && Math.abs(p.y - downY) < 6) {
-        input.onClick?.(p.x, p.y);
+      const tapped = moved < 6 && Math.abs(p.x - downX) < 6 && Math.abs(p.y - downY) < 6;
+      if (tapped) {
+        const now = performance.now();
+        const second =
+          now - lastTapAt < DOUBLE_MS &&
+          Math.abs(p.x - lastTapX) < DOUBLE_SLOP_PX &&
+          Math.abs(p.y - lastTapY) < DOUBLE_SLOP_PX;
+        if (second) {
+          if (pendingClick !== null) clearTimeout(pendingClick);
+          pendingClick = null;
+          lastTapAt = -Infinity;
+          input.onDoubleClick?.(p.x, p.y);
+        } else {
+          lastTapAt = now;
+          lastTapX = p.x;
+          lastTapY = p.y;
+          if (pendingClick !== null) clearTimeout(pendingClick);
+          pendingClick = setTimeout(() => {
+            pendingClick = null;
+            input.onClick?.(p.x, p.y);
+            wake();
+          }, DOUBLE_MS);
+        }
       }
     }
     wake();
@@ -163,6 +203,7 @@ export function attachInput(
   canvas.addEventListener('pointerup', release);
   canvas.addEventListener('pointercancel', release);
 
+  canvas.addEventListener('dblclick', (e) => e.preventDefault());
   canvas.addEventListener('contextmenu', (e) => e.preventDefault());
 }
 

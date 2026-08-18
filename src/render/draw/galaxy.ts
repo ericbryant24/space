@@ -528,7 +528,7 @@ export function drawGalaxyInterior(
       const density = armDensity(t, gx, gy);
       const texture = cloudAt(gx, gy, cloudLevel) * wCoarse + cloudAt(gx, gy, cloudLevel + 1) * wFine;
       // Diffuse, unresolved emission: dim and additive, never a covering layer.
-      const a = Math.min(0.62, density * (0.25 + 0.75 * texture) * (0.3 + 0.16 * deep));
+      const a = Math.min(0.5, density * (0.25 + 0.75 * texture) * (0.26 + 0.09 * deep));
       // The bright cores of the clouds blend in continuously rather than switching tone at a threshold.
       const hot = Math.max(0, Math.min(1, (texture - 0.58) / 0.42));
       const o = (j * WASH_W + i) * 4;
@@ -544,7 +544,7 @@ export function drawGalaxyInterior(
   ctx.imageSmoothingEnabled = true;
   // Emission adds to the void rather than painting over it.
   ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = 0.75 + 0.12 * deep;
+  ctx.globalAlpha = 0.72;
   ctx.drawImage(surface as CanvasImageSource, 0, 0, WASH_W, WASH_H, 0, 0, viewW, viewH);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';

@@ -1,12 +1,14 @@
 import { createCamera, frameToNode, nodeToFrame, type View } from './camera/camera.ts';
 import { R_ENTER } from './camera/rebase.ts';
-import { planFlight, stepFlight, type Flight } from './camera/flyto.ts';
+import { commonDepth, planFlight, positionInAncestor, stepFlight, type Flight } from './camera/flyto.ts';
 import { ascend, updateFocus } from './camera/rebase.ts';
 import { setSimTime } from './core/clock.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, stepInput } from './input/pointer.ts';
 import {
+  displayName,
   drawHover,
+  drawLock,
   hitTest,
   hoverLabel,
   render,
@@ -14,7 +16,7 @@ import {
   setRecordAllHits,
   type HitEntry,
 } from './render/renderer.ts';
-import { childNear, childrenNear } from './universe/node.ts';
+import { childNear, childrenNear, type Cell } from './universe/node.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
 import { createHud } from './ui/hud.ts';
@@ -33,6 +35,18 @@ let flight: Flight | null = null;
  * entry when it lands: the entry it is flying towards already exists, and pushing would clobber the
  * forward stack, so forward would silently stop working.
  */
+/**
+ * The thing the view is locked onto, if any. Double-click sets it; panning, rising and travelling clear it.
+ *
+ * This exists because of one specific complaint: "I should be able to zoom into anything, which is a
+ * problem with movement." Everything below a galaxy is on an orbit, so a planet you are aiming at slides
+ * out from under the cursor while you scroll toward it, and there are seventeen doublings of scrolling
+ * between a system view and that planet. Locking on inverts the problem: the tracked thing is pinned to
+ * the middle of the screen and the rest of the universe moves around it, so zooming toward it is just
+ * zooming.
+ */
+let tracked: readonly Cell[] | null = null;
+
 let flightFromHistory = false;
 let lastHits: readonly HitEntry[] = [];
 let lastSignature = '';
@@ -85,6 +99,7 @@ function applyState(state: Partial<CameraState>): void {
     }
     cam.node = node ?? tree.root;
   }
+  tracked = null;
   cam.k = state.k ?? 0;
   cam.cx = state.cx ?? 0;
   cam.cy = state.cy ?? 0;
@@ -111,6 +126,40 @@ function resize(): void {
 const EPOCH = Date.now();
 let motion = true;
 
+
+/**
+ * Put the tracked node back in the middle of the screen. Runs every frame, before `updateFocus`, so the
+ * focus machinery then descends into whatever is under the camera -- which is the tracked node.
+ *
+ * Both positions are taken in the units of the lowest common ancestor, which is the only frame in which
+ * they are simultaneously representable: the camera's own frame is normalised to radius 1 precisely so
+ * that nothing ever has to hold a coordinate spanning the whole ladder.
+ */
+function followTracked(): void {
+  if (!tracked) return;
+  const target = tree.resolve(tracked);
+  if (!target) {
+    tracked = null;
+    return;
+  }
+  const depth = commonDepth(cam.node.path, tracked);
+  const to = positionInAncestor(tree, target, 0, 0, depth);
+  const from = positionInAncestor(tree, cam.node, 0, 0, depth);
+  if (!to || !from || from.scale === 0) {
+    tracked = null;
+    return;
+  }
+  const nx = (to.x - from.x) / from.scale;
+  const ny = (to.y - from.y) / from.scale;
+  if (!Number.isFinite(nx) || !Number.isFinite(ny)) {
+    tracked = null;
+    return;
+  }
+  const [fx, fy] = nodeToFrame(cam, nx, ny);
+  cam.fx = fx;
+  cam.fy = fy;
+}
+
 const loop = startLoop((dt) => {
   if (motion) setSimTime((Date.now() - EPOCH) / 1000);
   let moving = false;
@@ -131,6 +180,7 @@ const loop = startLoop((dt) => {
     }
   } else {
     moving = stepInput(cam, input, view, dt);
+    followTracked();
     updateFocus(cam, tree, view);
     // Write the URL whenever the camera has actually moved, rather than only while input is active.
     // Keying off the input spring missed every programmatic move and left stale links behind.
@@ -144,6 +194,13 @@ const loop = startLoop((dt) => {
   tree.beginFrame();
   const stats = render(ctx, cam, tree, view);
   lastHits = stats.hits;
+
+  // The lock, drawn first so a hover over the same thing sits on top of it.
+  if (tracked) {
+    const at = pick(view.w / 2, view.h / 2);
+    const node = tree.resolve(tracked);
+    if (at && node && samePath(at.path, tracked)) drawLock(ctx, at, displayName(node, tree));
+  }
 
   // Reticle under the cursor, so it is visible that things can be travelled to at all.
   if (!flight && !input.dragging) {
@@ -165,10 +222,30 @@ const loop = startLoop((dt) => {
 
 attachInput(canvas, cam, input, () => view, () => loop.wake());
 
+// Dragging is the user saying "look somewhere else", which is the opposite of a lock.
+input.onPan = () => {
+  tracked = null;
+};
+
 input.onClick = (x, y) => {
   const hit = pick(x, y);
   if (!hit) return;
   travelTo(hit);
+};
+
+/**
+ * Double click locks the view onto a thing. Double click on empty space lets go.
+ *
+ * Deliberately does not change the zoom: locking on is about WHERE the middle of the screen is, not how
+ * close you are. Once locked, scrolling is a straight approach, because the thing cannot go anywhere.
+ */
+input.onDoubleClick = (x, y) => {
+  const hit = pick(x, y);
+  flight = null;
+  tracked = hit ? hit.path : null;
+  input.cancelZoom();
+  input.zTarget = cam.z;
+  loop.wake();
 };
 
 /**
@@ -206,6 +283,9 @@ const FLY_THRESHOLD_DOUBLINGS = 4;
 function travelTo(hit: HitEntry): boolean {
   const planned = planFlight(cam, tree, hit.path, view);
   if (!planned) return false;
+  // A flight is a different way of saying "put me there", and it ends with the target as the focus node --
+  // which carries the camera by itself. Holding a lock through one would fight it every frame.
+  tracked = null;
   flight = planned;
   flightFromHistory = false;
   input.cancelZoom();
@@ -215,13 +295,24 @@ function travelTo(hit: HitEntry): boolean {
 
 input.onZoomIntent = (x, y) => {
   if (flight) return false;
-  const hit = pick(x, y);
-  // Only when hand-zooming to it would mean crossing a gap no one could cross by scrolling. (`pick`
-  // has already discarded the focus node and its ancestors.)
+  // Locked on: scrolling means "closer to that", never "off to whatever the cursor happens to be over".
+  // The lock already pins it to the middle of the screen, so the only thing worth taking over for is the
+  // long haul -- seventeen doublings between a system view and one of its planets is thirty-odd notches of
+  // wheel, and the flight covers it in two seconds and lands with the planet carrying the camera.
+  const hit = tracked ? pick(view.w / 2, view.h / 2) : pick(x, y);
   if (!hit) return false;
+  if (tracked && !samePath(hit.path, tracked)) return false;
   if (doublingsAway(hit) <= FLY_THRESHOLD_DOUBLINGS) return false;
   return travelTo(hit);
 };
+
+function samePath(a: readonly Cell[], b: readonly Cell[]): boolean {
+  if (a.length !== b.length) return false;
+  for (let i = 0; i < a.length; i++) {
+    if (a[i]!.cx !== b[i]!.cx || a[i]!.cy !== b[i]!.cy) return false;
+  }
+  return true;
+}
 
 /** Fly to the ancestor at a given path depth. Used by the breadcrumb. */
 function flyToDepth(depth: number): void {
@@ -269,6 +360,7 @@ window.addEventListener('keydown', (e) => {
     case 'Backspace':
     case 'u':
       flight = null;
+      tracked = null;
       ascend(cam, tree);
       input.zTarget = cam.z;
       router.push(stateOf(cam, seed));
@@ -285,8 +377,14 @@ window.addEventListener('keydown', (e) => {
     case ' ':
       motion = !motion;
       break;
+    case '`':
+      // The numbers, for whoever is working on the renderer rather than looking at the universe.
+      hud.setDebug(!hud.debugVisible());
+      loop.wake();
+      break;
     case 'Home':
       flight = null;
+      tracked = null;
       applyState({ path: [], k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z: ROOT_Z });
       router.push(stateOf(cam, seed));
       break;
@@ -323,6 +421,7 @@ function zoomKey(dz: number, ax: number, ay: number): void {
 
 function nudge(dx: number, dy: number): void {
   flight = null;
+  tracked = null;
   flightFromHistory = false;
   input.velX = dx * 0.25;
   input.velY = dy * 0.25;
@@ -384,6 +483,17 @@ Object.assign(window as unknown as Record<string, unknown>, {
         : null,
     };
   },
+  /** Show the renderer's numbers. The screenshot harness turns them on to assert the precision invariant. */
+  __setDebug: (on: boolean): void => {
+    hud.setDebug(on);
+    loop.wake();
+  },
+  /** Double-click equivalent: lock the view onto whatever is at this point. */
+  __lockOn: (x: number, y: number): void => {
+    input.onDoubleClick?.(x, y);
+  },
+  /** The path the view is currently locked onto, or null. */
+  __tracked: () => (tracked ? tracked.map((c) => `${c.cx}.${c.cy}`).join('/') : null),
   /** Make the renderer report every mark it draws, including scattered stars. See `setRecordAllHits`. */
   __recordAllHits: (on: boolean): void => {
     setRecordAllHits(on);

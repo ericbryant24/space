@@ -10,14 +10,19 @@ import type { RenderStats } from '../render/renderer.ts';
 
 export interface Hud {
   update(cam: Camera, stats: RenderStats, fps: number, frameMs: number): void;
+  /** Show or hide the numbers. Bound to the backtick key; off unless someone asks for it. */
+  setDebug(on: boolean): void;
+  debugVisible(): boolean;
 }
 
 /**
- * Chrome, plus the debug overlay.
+ * Chrome: a name, a lineage, a scale bar. Plus the numbers, which are OFF BY DEFAULT.
  *
- * R and the mantissa headroom are the two numbers that say whether the precision invariant still
- * holds, and a regression in either is completely invisible in a screenshot. Keeping them on screen
- * has been the single most useful piece of infrastructure in the project.
+ * R and the mantissa headroom are the two numbers that say whether the precision invariant still holds,
+ * and a regression in either is invisible in a screenshot -- keeping them on screen has been the most
+ * useful piece of infrastructure in the project. They are also a wall of monospace telling you about the
+ * renderer rather than about the universe, and a place that has to be explained in words has not been
+ * drawn well enough. So they live behind the backtick key now.
  */
 export function createHud(root: HTMLElement, tree: Tree, onCrumb: (depth: number) => void): Hud {
   const trail = document.createElement('nav');
@@ -39,8 +44,16 @@ export function createHud(root: HTMLElement, tree: Tree, onCrumb: (depth: number
   });
 
   let lastTrailKey = '';
+  let debug = false;
 
   return {
+    setDebug(on) {
+      debug = on;
+      panel.classList.toggle('measuring', on);
+    },
+    debugVisible() {
+      return debug;
+    },
     update(cam, stats, fps, frameMs) {
       const r = pxPerUnit(cam);
       const headroom = mantissaHeadroom(cam);
@@ -65,20 +78,23 @@ export function createHud(root: HTMLElement, tree: Tree, onCrumb: (depth: number
       }
 
       const name = displayName(cam.node, tree);
+      // A name and what kind of thing it is. Everything else about the place is on screen already, or is
+      // not yet drawn well enough -- and a sentence explaining a picture is an admission about the picture.
       const card = placeCard(cam, tree);
 
-      panel.innerHTML = `
-        <div class="name">${escapeHtml(name)}</div>
-        <div class="sub">${escapeHtml(card.sub)}</div>
-        ${card.line ? `<div class="lore">${escapeHtml(card.line)}</div>` : ''}
-        <div class="rows">
+      panel.innerHTML =
+        `<div class="name">${escapeHtml(name)}</div>` +
+        `<div class="sub">${escapeHtml(card.sub)}</div>` +
+        (debug
+          ? `<div class="rows">
           <div><span class="dim">R</span> <span class="${inWindow ? 'good' : 'bad'}">${r.toFixed(1)} px</span> <span class="dim">[64, 1024]</span></div>
           <div><span class="dim">mantissa</span> <span class="${headroom > 30 ? 'good' : 'bad'}">${headroom.toFixed(1)} bits</span></div>
           <div><span class="dim">z</span> ${cam.z.toFixed(3)} <span class="dim">k</span> ${cam.k} <span class="dim">cell</span> ${cam.cx}, ${cam.cy}</div>
           <div><span class="dim">offset</span> ${cam.fx.toFixed(4)}, ${cam.fy.toFixed(4)}</div>
           <div><span class="dim">draws</span> ${stats.draws}${stats.budgetHit ? ' <span class="bad">capped</span>' : ''} <span class="dim">fps</span> ${fps.toFixed(0)} <span class="dim">ms</span> ${frameMs.toFixed(1)}</div>
-        </div>
-      `;
+          <div><span class="dim">lore</span> ${escapeHtml(card.line)}</div>
+        </div>`
+          : '');
 
       // A real scale bar in real units. Cheap, and it grounds the whole descent.
       const mpp = metresPerPixel(cam);

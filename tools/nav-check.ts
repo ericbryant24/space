@@ -158,12 +158,70 @@ const main = async () => {
   if (!target) fail('no clickable child was on screen to fly to');
   console.log(`target    ${target.kind} at (${target.x.toFixed(0)}, ${target.y.toFixed(0)}) r=${target.r.toFixed(0)}px`);
   await page.mouse.click(target.x, target.y);
+  // A single click is held for the length of the double-click window before it acts, so that a double click
+  // does not also launch a flight it then has to cancel. Sampling before that elapses sees a camera that has
+  // not moved yet and reads as "the click did nothing".
+  await page.evaluate(() => new Promise((r) => setTimeout(r, 320)));
   await rest(page);
   const after = await state(page);
   console.log(`click     ${before.path || 'root'} -> ${after.path || 'root'}`);
   if (after.path !== target.path) fail(`click landed at "${after.path}", expected "${target.path}"`);
 
-  // 8. One scroll notch toward a star at galaxy level must land inside that star's system.
+  // 8. Double click locks the view onto a thing, and it stays locked while the thing moves.
+  //
+  // This is the answer to "I should be able to zoom into anything, which is a problem with movement":
+  // everything below a galaxy orbits, so a planet slides out from under the cursor while you scroll toward
+  // it. Locked on, it cannot -- and the check is exactly that, with ambient motion running.
+  await page.goto(BASE, { waitUntil: 'load' });
+  await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 15000 });
+  for (let i = 0; i < 600; i++) {
+    if ((await state(page)).kind === 'system') break;
+    await page.evaluate(() => (window as unknown as { __diveStep(dz?: number): void }).__diveStep(0.5));
+  }
+  await settle(page, 10);
+  const orbiting = await page.evaluate(() => {
+    const hits = (window as unknown as {
+      __hits(): { path: string; kind: string; x: number; y: number }[];
+    }).__hits();
+    return hits.find((h) => h.kind === 'planet') ?? null;
+  });
+  if (!orbiting) fail('no planet was on screen at system level to lock onto');
+  await page.mouse.dblclick(orbiting.x, orbiting.y);
+  await settle(page, 8);
+  const lockedTo = await page.evaluate(() =>
+    (window as unknown as { __tracked(): string | null }).__tracked(),
+  );
+  if (lockedTo !== orbiting.path) fail(`double click locked onto "${lockedTo}", expected "${orbiting.path}"`);
+
+  let drift = 0;
+  for (let i = 0; i < 25; i++) {
+    await settle(page, 12);
+    const off = await page.evaluate((want: string) => {
+      const w = window as unknown as {
+        __pick(x: number, y: number): { path: string; x: number; y: number } | null;
+      };
+      const hit = w.__pick(window.innerWidth / 2, window.innerHeight / 2);
+      if (!hit) return Number.POSITIVE_INFINITY;
+      if (hit.path !== want && !want.startsWith(hit.path)) return Number.POSITIVE_INFINITY;
+      return Math.hypot(hit.x - window.innerWidth / 2, hit.y - window.innerHeight / 2);
+    }, orbiting.path);
+    drift = Math.max(drift, off);
+  }
+  console.log(`lock      ${orbiting.path} held dead centre through 300 frames of orbit, drift ${drift.toFixed(1)}px`);
+  if (!(drift <= 1)) fail(`the locked planet drifted ${drift} px off centre`);
+
+  // Dragging is the user looking elsewhere, and has to let go of the lock.
+  await page.mouse.move(640, 400);
+  await page.mouse.down();
+  await page.mouse.move(700, 430, { steps: 4 });
+  await page.mouse.up();
+  await settle(page, 4);
+  const afterDrag = await page.evaluate(() =>
+    (window as unknown as { __tracked(): string | null }).__tracked(),
+  );
+  if (afterDrag !== null) fail(`dragging left the view still locked onto "${afterDrag}"`);
+
+  // 9. One scroll notch toward a star at galaxy level must land inside that star's system.
   //
   // This is the check for the whole point of scattered placement: a galaxy's visible stars ARE its
   // catalogued systems, so aiming at one and scrolling has to go there. It cannot be a unit test --
@@ -199,7 +257,7 @@ const main = async () => {
     fail(`one scroll notch at a star landed on ${arrived.kind}, expected system`);
   }
 
-  // 9. A garbage URL must not break the page.
+  // 10. A garbage URL must not break the page.
   await page.goto(`${BASE}#s=!!!&p=zz.-1-oops&k=-9&z=NaN&o=x,y`, { waitUntil: 'load' });
   await page.waitForFunction('window.__cam !== undefined', null, { timeout: 15000 });
   await settle(page, 6);
