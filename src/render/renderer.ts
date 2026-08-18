@@ -1,7 +1,14 @@
 import { frameToNode, nodeToFrame, pxPerUnit, type Camera, type View } from '../camera/camera.ts';
+import { catalogName } from '../cosmic/catalog.ts';
 import { childAt, makeChild, type Cell, type Node } from '../universe/node.ts';
+import { galaxyTraits, type GalaxyTraits } from '../universe/gen/galaxy.ts';
 import { LEVELS, anchorLevel, type Kind } from '../universe/schema.ts';
 import type { Tree } from '../universe/tree.ts';
+import { activeReps } from './bands.ts';
+import { beginSpriteFrame, spritesPending } from './sprites.ts';
+import { cosmicPaletteOf, css, voidBackgroundFor } from './palettes.ts';
+import { drawGalaxyInterior, drawGalaxyLive, drawGalaxySprite, drawGalaxyStandIn } from './draw/galaxy.ts';
+import { drawContainer, drawStar } from './draw/containers.ts';
 
 /** Objects smaller than this are not drawn at all; later their light folds into a baked wash tile. */
 const MIN_DRAW_PX = 0.45;
@@ -35,11 +42,13 @@ export interface RenderStats {
   cells: number;
   labels: number;
   budgetHit: boolean;
+  /** Sprites still queued for baking; the loop keeps running until this clears. */
+  spritesPending: boolean;
   topKind: Kind;
   hits: HitEntry[];
 }
 
-/** Placeholder palette for M0. Real palettes arrive with the cosmic/surface split in M2 and M6. */
+/** Placeholder styling for levels whose real art has not been built yet (planet and below). */
 const KIND_STYLE: Record<Kind, { hue: number; sat: number; light: number }> = {
   field: { hue: 232, sat: 30, light: 26 },
   cluster: { hue: 268, sat: 46, light: 40 },
@@ -60,6 +69,7 @@ interface Frame {
   view: View;
   r: number;
   diagonal: number;
+  detailBias: number;
   stats: RenderStats;
 }
 
@@ -68,6 +78,7 @@ export function render(
   cam: Camera,
   tree: Tree,
   view: View,
+  detailBias = 1,
 ): RenderStats {
   const r = pxPerUnit(cam);
   const stats: RenderStats = {
@@ -75,13 +86,15 @@ export function render(
     cells: 0,
     labels: 0,
     budgetHit: false,
+    spritesPending: false,
     topKind: cam.node.kind,
     hits: [],
   };
+  beginSpriteFrame();
   const diagonal = Math.hypot(view.w, view.h);
-  const frame: Frame = { ctx, cam, tree, view, r, diagonal, stats };
+  const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, stats };
 
-  ctx.fillStyle = '#080a12';
+  ctx.fillStyle = css(voidBackgroundFor(cam.node, tree));
   ctx.fillRect(0, 0, view.w, view.h);
 
   // A zoom changes every pixel on screen, so there is no dirty-rect path anywhere: full clear, full
@@ -108,7 +121,18 @@ export function render(
   }
   stats.topKind = node.kind;
 
+  // The sky. Whenever the camera is inside a galaxy -- at ANY depth below it, right down to standing
+  // next to a building -- the enclosing galaxy's starfield is the backdrop, because you can still see
+  // stars from between two planets. Without this, the long stretches where the galaxy is bigger than
+  // the screen and its systems are still sub-pixel rendered as a blank screen.
+  const sky = galaxyViewport(cam, tree, view);
+  if (sky) {
+    drawGalaxyInterior(ctx, galaxyTraitsCached(sky.id), sky.x0, sky.x1, sky.y0, sky.y1, view.w, view.h);
+    stats.draws++;
+  }
+
   paint(frame, node, centreX, centreY, scale, 0);
+  stats.spritesPending = spritesPending();
   return stats;
 }
 
@@ -194,8 +218,43 @@ function paint(frame: Frame, node: Node, cxF: number, cyF: number, scale: number
   }
 }
 
+/**
+ * Which levels are containers rather than objects. Getting this wrong was the most visible art bug in
+ * the first pass: an opaque cluster disc hid every galaxy inside it.
+ */
+const CONTAINER: Partial<Record<Kind, number>> = {
+  field: 0.5,
+  cluster: 0.85,
+  system: 0.7,
+  region: 1,
+  settlement: 1,
+};
+
 function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number): void {
   const { ctx } = frame;
+
+  if (node.kind === 'galaxy') {
+    drawGalaxy(frame, node, sx, sy, rPx);
+    return;
+  }
+
+  const containerStrength = CONTAINER[node.kind];
+  if (containerStrength !== undefined) {
+    const style = KIND_STYLE[node.kind];
+    const drift = ((node.id % 512) / 512 - 0.5) * 26;
+    drawContainer(
+      ctx,
+      sx,
+      sy,
+      rPx,
+      { h: style.hue + drift, s: style.sat / 100, l: style.light / 100 },
+      containerStrength,
+    );
+    // A system's content is its star, and the star is minute next to the system's own extent.
+    if (node.kind === 'system') drawStar(ctx, sx, sy, rPx, node.id);
+    return;
+  }
+
   const style = KIND_STYLE[node.kind];
   // A little per-node hue drift so a field of siblings is not one flat colour.
   const drift = ((node.id % 512) / 512 - 0.5) * 26;
@@ -226,8 +285,85 @@ function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number)
 
 const MIN_OUTLINE_PX = 6;
 
+/**
+ * Galaxies cross-fade between three representations of the SAME density field: a blurred blob, a baked
+ * wash sprite, and live arms with stipple. Because all three derive from `armDensity`, and because the
+ * band alphas sum to exactly 1, the transitions have nothing to morph.
+ */
+function drawGalaxy(frame: Frame, node: Node, sx: number, sy: number, rPx: number): void {
+  const { ctx, stats } = frame;
+  const traits = galaxyTraitsCached(node.id);
+
+  for (const { rep, alpha } of activeReps('galaxy', rPx, frame.detailBias)) {
+    ctx.globalAlpha = alpha;
+    switch (rep) {
+      case 'blob':
+        if (!drawGalaxySprite(ctx, sx, sy, rPx, node.id, traits, true)) {
+          drawGalaxyStandIn(ctx, sx, sy, rPx, traits);
+        }
+        break;
+      case 'wash':
+        if (!drawGalaxySprite(ctx, sx, sy, rPx, node.id, traits, false)) {
+          drawGalaxyStandIn(ctx, sx, sy, rPx, traits);
+        }
+        break;
+      case 'arms': {
+        const budget = Math.max(0, Math.min(2600, DRAW_BUDGET - stats.draws));
+        stats.draws += drawGalaxyLive(ctx, sx, sy, rPx, traits, { starBudget: budget });
+        break;
+      }
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/**
+ * The viewport expressed in the enclosing galaxy's coordinates, or null if the camera is above galaxy
+ * level. Walks the focus lineage upwards accumulating child-to-parent scale factors, so it works
+ * identically whether the galaxy is the focus node or six levels above it.
+ */
+function galaxyViewport(
+  cam: Camera,
+  tree: Tree,
+  view: View,
+): { id: number; x0: number; x1: number; y0: number; y1: number } | null {
+  let node: Node | null = cam.node;
+  let [nx, ny] = frameToNode(cam, cam.fx, cam.fy);
+  // One unit of the current node, measured in units of whatever node we have climbed to.
+  let unitScale = 1;
+
+  for (let i = 0; i < 10 && node; i++) {
+    if (node.kind === 'galaxy') {
+      const halfW = ((view.w / 2) / pxPerUnit(cam)) * 2 ** -cam.k * unitScale;
+      const halfH = ((view.h / 2) / pxPerUnit(cam)) * 2 ** -cam.k * unitScale;
+      return { id: node.id, x0: nx - halfW, x1: nx + halfW, y0: ny - halfH, y1: ny + halfH };
+    }
+    const ref = tree.refOf(node);
+    const parent: Node | null = tree.parentOf(node);
+    if (!ref || !parent) return null;
+    nx = ref.ox + nx * ref.rel;
+    ny = ref.oy + ny * ref.rel;
+    unitScale *= ref.rel;
+    node = parent;
+  }
+  return null;
+}
+
+const traitCache = new Map<number, GalaxyTraits>();
+
+function galaxyTraitsCached(id: number): GalaxyTraits {
+  let t = traitCache.get(id);
+  if (!t) {
+    t = galaxyTraits(id);
+    if (traitCache.size > 512) traitCache.clear();
+    traitCache.set(id, t);
+  }
+  return t;
+}
+
 function drawLabel(ctx: CanvasRenderingContext2D, node: Node, sx: number, sy: number, rPx: number): void {
-  const text = `${LEVELS[node.kind].label} ${node.path.map((c) => `${c.cx}.${c.cy}`).slice(-1).join('') || 'root'}`;
+  const last = node.path[node.path.length - 1];
+  const text = catalogName(node.kind, node.id, last ? last.cx + last.cy : 0);
   ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';

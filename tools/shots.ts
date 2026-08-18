@@ -62,6 +62,9 @@ const main = async () => {
   const seen = new Set<string>();
   let minHeadroom = Infinity;
   let index = 0;
+  // Filmstrip mode also captures the stretches BETWEEN rungs, which is where "everything in between"
+  // either holds up or turns out to be a dead void.
+  const strip = process.env.SHOT_STRIP ? Number(process.env.SHOT_STRIP) : 0;
 
   for (let step = 0; step < 400; step++) {
     const state = await readState(page);
@@ -78,6 +81,10 @@ const main = async () => {
         `${name.padEnd(14)} depth=${state.depth} R=${state.r.toFixed(1)}px ` +
           `headroom=${state.headroom.toFixed(1)}b z=${state.z.toFixed(2)} draws=${state.draws}`,
       );
+    }
+    if (strip && step % strip === 0) {
+      const label = `strip-${String(step).padStart(3, '0')}-${state.kind}-z${state.z.toFixed(0)}`;
+      await page.screenshot({ path: `${OUT}/${label}.png` });
     }
     if (state.kind === 'building') break;
 

@@ -39,7 +39,8 @@ const loop = startLoop((dt) => {
   hud.update(cam, stats, loop.fps, loop.frameMs);
   lastHits = stats.hits;
   (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
-  return moving;
+  // Keep running while sprites are still resolving, otherwise the view would sleep half-baked.
+  return moving || stats.spritesPending;
 });
 
 let lastHits: ReturnType<typeof render>['hits'] = [];
@@ -173,4 +174,13 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __loop: loop,
   __input: input,
   __diveStep: diveStep,
+  /** Render one frame synchronously and return how long the render itself took, in ms. */
+  __renderOnce: (): number => {
+    tree.beginFrame();
+    const t0 = performance.now();
+    const stats = render(ctx, cam, tree, view);
+    const ms = performance.now() - t0;
+    (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
+    return ms;
+  },
 });

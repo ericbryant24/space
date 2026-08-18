@@ -9,7 +9,8 @@
     "preview": "vite preview",
     "typecheck": "tsc --noEmit",
     "test": "node --test \"test/**/*.test.ts\"",
-    "shots": "node tools/shots.ts"
+    "shots": "node tools/shots.ts",
+    "perf": "node tools/perf.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
