@@ -1,6 +1,14 @@
 import { strict as assert } from 'node:assert';
 import test from 'node:test';
-import { coastlineOf, detailForScale, elevationAt, seaLevelOf, traceRings } from '../src/culture/terrain.ts';
+import {
+  PLACEMENT_DETAIL,
+  coastlineOf,
+  detailForScale,
+  elevationAt,
+  seaLevelOf,
+  traceRings,
+} from '../src/culture/terrain.ts';
+import { childAt, makeChild, type Node } from '../src/universe/node.ts';
 import { planetTraits } from '../src/universe/gen/planet.ts';
 
 const worlds = () => {
@@ -126,4 +134,98 @@ test('sea level is stable for a planet, whatever asks for it', () => {
   const a = seaLevelOf(id, traits);
   const b = seaLevelOf(id, traits);
   assert.equal(a, b, 'a cached sea level must be the same number every time');
+});
+
+/**
+ * NOTHING IS BUILT IN THE SEA.
+ *
+ * Placement below a planet consults the same field the surface is drawn from, so this is the other half of the
+ * consistency promise: not only does a region draw the right terrain, the things standing on it stand on land.
+ * Before the ground frame descended with each node, `childAt` had no way to ask -- and settlements floated over
+ * open ocean on a bathymetric chart with nothing under them.
+ */
+test('settlements and buildings only stand on land', () => {
+  let checkedSettlements = 0;
+  let checkedBuildings = 0;
+
+  for (const { id, traits } of worlds().slice(0, 20)) {
+    const planet: Node = {
+      kind: 'planet',
+      id,
+      logSpan: 23,
+      path: [],
+      ground: { planetId: id, traits, x: 0, y: 0, span: 1 },
+    };
+
+    // A scatter of region cells across the planet's anchor grid.
+    for (let i = 0; i < 220; i++) {
+      const cx = (i * 37) % 64;
+      const cy = (i * 23 + 11) % 64;
+      const regionRef = childAt(planet, { cx, cy });
+      if (!regionRef) continue;
+      const region = makeChild(planet, regionRef);
+
+      for (let j = 0; j < 40; j++) {
+        const settlementRef = childAt(region, { cx: (j * 7) % 16, cy: (j * 5 + 3) % 16 });
+        if (!settlementRef) continue;
+        const settlement = makeChild(region, settlementRef);
+        const g = settlement.ground!;
+        checkedSettlements++;
+        assert.ok(
+          elevationAt(g.planetId, g.traits, g.x, g.y, PLACEMENT_DETAIL) > 0,
+          `a settlement on planet ${id} stands at elevation ` +
+            `${elevationAt(g.planetId, g.traits, g.x, g.y, PLACEMENT_DETAIL).toFixed(4)}, which is under water`,
+        );
+
+        for (let k = 0; k < 16; k++) {
+          const buildingRef = childAt(settlement, { cx: (k * 3) % 16, cy: (k * 11) % 16 });
+          if (!buildingRef) continue;
+          const bg = makeChild(settlement, buildingRef).ground!;
+          checkedBuildings++;
+          assert.ok(
+            elevationAt(bg.planetId, bg.traits, bg.x, bg.y, PLACEMENT_DETAIL) > 0,
+            `a building on planet ${id} stands under water`,
+          );
+        }
+      }
+    }
+  }
+
+  // The rule is worthless if the walk never found anything to check.
+  assert.ok(checkedSettlements > 200, `only ${checkedSettlements} settlements examined`);
+  assert.ok(checkedBuildings > 200, `only ${checkedBuildings} buildings examined`);
+});
+
+/** The frame has to compose down the tree, or everything below a region is placed against the wrong patch. */
+test('the ground frame composes down the tree', () => {
+  const { id, traits } = worlds()[5]!;
+  const planet: Node = {
+    kind: 'planet',
+    id,
+    logSpan: 23,
+    path: [],
+    ground: { planetId: id, traits, x: 0, y: 0, span: 1 },
+  };
+  let region = null;
+  for (let i = 0; i < 400 && !region; i++) {
+    const ref = childAt(planet, { cx: (i * 37) % 64, cy: (i * 23 + 11) % 64 });
+    if (ref) region = { ref, node: makeChild(planet, ref) };
+  }
+  assert.ok(region, 'no region found to check');
+
+  const g = region.node.ground!;
+  assert.equal(g.planetId, id, 'a region must belong to its own planet');
+  assert.ok(Math.abs(g.x - region.ref.ox) < 1e-12, 'a region sits where its ref says, in planet units');
+  assert.ok(Math.abs(g.span - region.ref.rel) < 1e-12, 'a region spans what its ref says');
+
+  for (let j = 0; j < 200; j++) {
+    const ref = childAt(region.node, { cx: (j * 7) % 16, cy: (j * 5 + 3) % 16 });
+    if (!ref) continue;
+    const sg = makeChild(region.node, ref).ground!;
+    // Composition, stated as the arithmetic it is.
+    assert.ok(Math.abs(sg.x - (g.x + ref.ox * g.span)) < 1e-15, 'a settlement is offset within its region');
+    assert.ok(Math.abs(sg.span - g.span * ref.rel) < 1e-18, 'a settlement is scaled by its region');
+    return;
+  }
+  throw new Error('no settlement found to check');
 });

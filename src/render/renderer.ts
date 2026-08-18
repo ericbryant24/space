@@ -29,7 +29,7 @@ import {
 } from './draw/containers.ts';
 import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
 import { drawRegion } from './draw/ground.ts';
-import { planetTraitsFor, type PlanetTraits } from '../universe/gen/planet.ts';
+import type { PlanetTraits } from '../universe/gen/planet.ts';
 import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
 
 /** Objects smaller than this are not drawn at all; later their light folds into a baked wash tile. */
@@ -414,14 +414,15 @@ function drawDisc(
   }
 
   if (node.kind === 'planet') {
-    const traits = planetTraitsFor(node, frame.tree);
+    const traits = node.ground?.traits;
+    if (!traits) return;
     // Returns the radius actually drawn, which may be the schematic floor rather than the true size.
     frame.lastDrawnRadius = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
     return;
   }
 
   if (node.kind === 'region') {
-    drawRegion(ctx, sx, sy, rPx, node, frame.tree);
+    drawRegion(ctx, sx, sy, rPx, node);
     return;
   }
 
@@ -579,7 +580,8 @@ function drawGround(frame: Frame): boolean {
     unitScale *= ref.rel;
     node = parent;
   }
-  if (!node || node.kind !== 'planet') return false;
+  if (!node || node.kind !== 'planet' || !node.ground) return false;
+  const traits = node.ground.traits;
 
   // The planet's own radius on screen. `pxPerUnit` is per frame unit, and a frame is 2^-k of the focus
   // node, which is itself `unitScale` of the planet.
@@ -588,7 +590,7 @@ function drawGround(frame: Frame): boolean {
   if (alpha < 0.01) return false;
 
   ctx.globalAlpha = alpha;
-  ctx.fillStyle = css(skyTone(planetTraitsFor(node, tree)));
+  ctx.fillStyle = css(skyTone(traits));
   ctx.fillRect(0, 0, view.w, view.h);
   ctx.globalAlpha = 1;
   return true;

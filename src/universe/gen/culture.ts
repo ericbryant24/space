@@ -3,7 +3,7 @@ import { motifOf, type Motif } from '../../culture/motif.ts';
 import { f01, hash2, hash3, pick, roll } from '../../core/rng.ts';
 import type { Node } from '../node.ts';
 import type { Tree } from '../tree.ts';
-import { planetTraitsFor, type PlanetTraits } from './planet.ts';
+import type { PlanetTraits } from './planet.ts';
 
 /**
  * A planet's culture.
@@ -95,6 +95,7 @@ export function planetCultureFor(
 ): { planet: Node; culture: PlanetCulture; traits: PlanetTraits } | null {
   const planet = enclosingPlanet(node, tree);
   if (!planet) return null;
-  const traits = planetTraitsFor(planet, tree);
+  const traits = planet.ground?.traits;
+  if (!traits) return null;
   return { planet, culture: cultureOf(planet.id, traits), traits };
 }

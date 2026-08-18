@@ -1,7 +1,12 @@
 import { simTime } from '../core/clock.ts';
 import { f01, fSym, hash, hash2, hash3, hash4, mix, roll } from '../core/rng.ts';
 import { armDensity, galaxyShape } from './gen/galaxyShape.ts';
+import { orbitRadius } from './orbits.ts';
 import { LEVELS, ROOT_KIND, anchorLevel, type Kind } from './schema.ts';
+import { planetTraits, type PlanetTraits } from './gen/planet.ts';
+import { PLACEMENT_DETAIL, elevationAt } from '../culture/terrain.ts';
+
+export { orbitRadius };
 
 /** A child's address within its parent: the anchor-grid cell it occupies. */
 export interface Cell {
@@ -16,6 +21,27 @@ export interface Node {
   readonly logSpan: number;
   /** Anchor cell at each ancestor, root-first. Empty at the root. This IS the permalink. */
   readonly path: readonly Cell[];
+  /** Where this node sits on its planet, for a planet and everything below it. Null above. */
+  readonly ground: Ground | null;
+}
+
+/**
+ * A node's place on its planet's surface, carried down the tree.
+ *
+ * This is the heritage chain the design always called for, made concrete: a planet knows its own traits, and
+ * every region, settlement and building below it knows where it stands in planet coordinates. Nothing has to
+ * walk back up through the tree to find out, which matters because `childAt` -- the one function that decides
+ * whether a child exists at all -- is pure and has no tree to walk. Carrying the frame is what lets it ask
+ * whether the ground there is above water.
+ */
+export interface Ground {
+  readonly planetId: number;
+  readonly traits: PlanetTraits;
+  /** Centre in planet units, where the planet's disc is the unit circle. */
+  readonly x: number;
+  readonly y: number;
+  /** Radius in planet units. One of this node's own units is this many planet units. */
+  readonly span: number;
 }
 
 /**
@@ -34,7 +60,7 @@ export interface ChildRef {
 }
 
 export function rootNode(seed: number): Node {
-  return { kind: ROOT_KIND, id: hash(0x5eed, seed), logSpan: LEVELS[ROOT_KIND].logSpan, path: [] };
+  return { kind: ROOT_KIND, id: hash(0x5eed, seed), logSpan: LEVELS[ROOT_KIND].logSpan, path: [], ground: null };
 }
 
 export function cellsPerAxis(k: number): number {
@@ -89,6 +115,24 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   const edge = 1 - dist;
   if (edge < 0.12 && f01(hash2(id, 0x05)) > edge / 0.12) return null;
 
+  /**
+   * ON A PLANET, THINGS ARE BUILT ON LAND.
+   *
+   * Placement below a planet consults the same terrain field the surface is drawn from, so a settlement cannot
+   * sit in open ocean and a building cannot stand in the sea -- which some of them plainly did, floating over
+   * a bathymetric chart with nothing under them. It is the same argument as stars belonging in a galaxy's arms:
+   * a thing in a place the art draws as empty is a lie, whichever direction the lie runs in.
+   *
+   * The detail level is FIXED rather than taken from the zoom. Placement has to be a pure function of address
+   * or a settlement would blink in and out as you approached, and every permalink to one would be a coin toss.
+   */
+  if (node.ground && (kind === 'settlement' || kind === 'building')) {
+    const g = node.ground;
+    const px = g.x + ox * g.span;
+    const py = g.y + oy * g.span;
+    if (elevationAt(g.planetId, g.traits, px, py, PLACEMENT_DETAIL) <= 0) return null;
+  }
+
   // Inside a galaxy, stars exist where the galaxy is luminous. Uniform placement put real systems in
   // regions the art draws as empty -- the mirror image of scattering decorative dots that correspond
   // to nothing, and just as much of a lie.
@@ -105,7 +149,43 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
 }
 
 export function makeChild(parent: Node, ref: ChildRef): Node {
-  return { kind: ref.kind, id: ref.id, logSpan: ref.logSpan, path: [...parent.path, ref.cell] };
+  return {
+    kind: ref.kind,
+    id: ref.id,
+    logSpan: ref.logSpan,
+    path: [...parent.path, ref.cell],
+    ground: groundFor(parent, ref),
+  };
+}
+
+/**
+ * The child's place on its planet.
+ *
+ * A planet starts the chain -- it IS its own coordinate system, so its frame is the unit disc, and its traits
+ * come from its star and its orbit, both of which are the parent system's business. Below that the frame is
+ * simple composition: the child sits at the parent's centre plus its own offset scaled by the parent's span.
+ */
+function groundFor(parent: Node, ref: ChildRef): Ground | null {
+  if (ref.kind === 'planet') {
+    const index = ref.cell.cx;
+    const count = Math.max(1, orbitCount(parent));
+    return {
+      planetId: ref.id,
+      traits: planetTraits(ref.id, parent.id, index, count),
+      x: 0,
+      y: 0,
+      span: 1,
+    };
+  }
+  const g = parent.ground;
+  if (!g) return null;
+  return {
+    planetId: g.planetId,
+    traits: g.traits,
+    x: g.x + ref.ox * g.span,
+    y: g.y + ref.oy * g.span,
+    span: g.span * ref.rel,
+  };
 }
 
 /** The anchor cell of `node`'s child grid that contains a point given in node units. */
@@ -177,12 +257,6 @@ export function orbitalChild(node: Node, index: number): ChildRef | null {
     oy: Math.sin(angle) * radius,
     rel,
   };
-}
-
-/** Orbital radius in parent units. A Titius-Bode-like progression: crowded inside, spread outside. */
-export function orbitRadius(index: number, count: number): number {
-  const frac = (index + 1) / (count + 0.6);
-  return 0.13 + 0.79 * frac ** 1.35;
 }
 
 /** Every body of an orbital system, in order. At most nine, so building the list is cheap. */

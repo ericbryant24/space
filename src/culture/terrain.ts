@@ -54,6 +54,16 @@ function octave(seed: number, x: number, y: number, level: number): number {
 const COARSE_LEVEL = 2;
 export const FINEST_LEVEL = 22;
 
+/**
+ * The detail level every PLACEMENT decision uses, regardless of zoom.
+ *
+ * Placement has to be a pure function of address. Taking the level from the current view would mean a
+ * settlement near the waterline appearing and disappearing as you approached it, and every permalink to one
+ * being a coin toss. Fixed at a level whose cells are about two kilometres, which is finer than a settlement
+ * and coarse enough that a building inherits the same answer as the town around it.
+ */
+export const PLACEMENT_DETAIL = 12;
+
 /** Amplitude falls by this factor per octave, so coarse shapes dominate and fine detail only textures. */
 const PERSISTENCE = 0.52;
 

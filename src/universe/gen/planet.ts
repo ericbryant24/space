@@ -1,7 +1,6 @@
 import { habitableZone, starLightOf, type StarLight } from '../../cosmic/spectral.ts';
 import { f01, roll } from '../../core/rng.ts';
-import { orbitCount, orbitRadius, type Node } from '../node.ts';
-import type { Tree } from '../tree.ts';
+import { orbitRadius } from '../orbits.ts';
 
 /**
  * Planet traits. Physical only -- language, architecture and biosphere belong here too, but they are
@@ -197,20 +196,11 @@ export function isGiant(cls: PlanetClass): boolean {
   return cls === 'gasGiant' || cls === 'iceGiant';
 }
 
-// One cache, shared by rendering and by the culture layer. Two separate caches drifted apart: the
-// culture layer was passing a guessed sibling count, which changes the orbital radius and therefore the
-// climate, so a planet had one climate when drawn and another when named.
-const cache = new Map<number, PlanetTraits>();
-
-export function planetTraitsFor(planet: Node, tree: Tree): PlanetTraits {
-  let t = cache.get(planet.id);
-  if (!t) {
-    const parent = tree.parentOf(planet);
-    const index = planet.path[planet.path.length - 1]?.cx ?? 0;
-    const count = parent ? Math.max(1, orbitCount(parent)) : 1;
-    t = planetTraits(planet.id, parent?.id ?? planet.id, index, count);
-    if (cache.size > 512) cache.clear();
-    cache.set(planet.id, t);
-  }
-  return t;
-}
+/**
+ * A planet's traits live on the planet NODE, attached when the node is built -- see `Ground` in node.ts.
+ *
+ * They used to be looked up through the tree, which meant this module imported `node.ts`. Reading them off the
+ * node instead reverses that dependency, and reversing it is what lets `childAt` consult the terrain -- which
+ * is what keeps a settlement out of the sea. The cache went with it: a node already holds its own traits, so
+ * there is nothing left to cache and nothing left for two caches to disagree about.
+ */

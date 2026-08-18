@@ -1,11 +1,7 @@
-import { positionInAncestor } from '../../camera/flyto.ts';
 import { detailForScale, elevationAt, negated, sampleGrid, traceGrid, windowed } from '../../culture/terrain.ts';
 import { atLuminance, css, luminanceOf, type Hsl } from '../color.ts';
 import { outlineWidth } from '../bands.ts';
-import { enclosingPlanet } from '../../universe/gen/culture.ts';
-import { planetTraitsFor, type PlanetTraits } from '../../universe/gen/planet.ts';
-import type { Node } from '../../universe/node.ts';
-import type { Tree } from '../../universe/tree.ts';
+import type { Ground, Node } from '../../universe/node.ts';
 import { surfaceColours, type Surface } from './planet.ts';
 
 /**
@@ -20,25 +16,6 @@ import { surfaceColours, type Surface } from './planet.ts';
  * region that straddles a coast has the coast running through it in the right place and at the right angle.
  * Nothing is re-rolled locally, because there is nothing to re-roll -- there is one field.
  */
-
-/** Where a node sits on its planet: centre and radius, in planet units. */
-export interface GroundFrame {
-  readonly planetId: number;
-  readonly traits: PlanetTraits;
-  /** Centre in planet units. */
-  readonly x: number;
-  readonly y: number;
-  /** Radius in planet units. One local unit is this many planet units. */
-  readonly span: number;
-}
-
-export function groundFrameOf(node: Node, tree: Tree): GroundFrame | null {
-  const planet = enclosingPlanet(node, tree);
-  if (!planet || planet.path.length >= node.path.length) return null;
-  const at = positionInAncestor(tree, node, 0, 0, planet.path.length);
-  if (!at || !(at.scale > 0)) return null;
-  return { planetId: planet.id, traits: planetTraitsFor(planet, tree), x: at.x, y: at.y, span: at.scale };
-}
 
 /** Grid resolution for a plate's contours. Enough for a ragged coast, cheap enough to trace every frame. */
 const RESOLUTION = 72;
@@ -83,7 +60,7 @@ interface Plate {
  */
 const plateCache = new Map<string, Plate>();
 
-function plateOf(node: Node, frame: GroundFrame, detail: number): Plate {
+function plateOf(node: Node, frame: Ground, detail: number): Plate {
   const key = `${node.id}:${detail}`;
   const hit = plateCache.get(key);
   if (hit) return hit;
@@ -100,8 +77,14 @@ function plateOf(node: Node, frame: GroundFrame, detail: number): Plate {
    */
   const raw = sampleGrid(elev, RESOLUTION, EDGE * 1.03);
   const up = windowed(raw, EDGE);
-  // The same grid upside down, so "deeper than" is just another "higher than" and needs no second sweep.
-  const down = negated(up);
+  /**
+   * The same field upside down, so "deeper than" is just another "higher than" and needs no second sweep.
+   *
+   * NEGATE FIRST, THEN WINDOW. Windowing the up-grid and negating that flips the drowned edge into a raised
+   * one, which puts the exterior on the wrong side of every threshold and inverts the parity: the deepest band
+   * then enclosed almost the whole plate and an ocean region went uniformly dark.
+   */
+  const down = windowed(negated(raw), EDGE);
 
   // The relief actually present in this plate, above and below the water, read off the grid we already have.
   let lo = Infinity;
@@ -189,9 +172,8 @@ export function drawRegion(
   cy: number,
   r: number,
   node: Node,
-  tree: Tree,
 ): void {
-  const frame = groundFrameOf(node, tree);
+  const frame = node.ground;
   if (!frame) return;
   const s = surfaceColours(frame.traits);
   const detail = Math.round(detailForScale(r / frame.span));
