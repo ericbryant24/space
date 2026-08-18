@@ -18,7 +18,8 @@ export interface InputState {
    * Called on every zoom-in gesture. Lets navigation decide whether the cursor is over something worth
    * travelling to, rather than zooming into the gap beside it.
    */
-  onZoomIntent: ((x: number, y: number, dz: number) => boolean) | null;
+  /** Called when a zoom-in starts, with the cursor position. May take over what the view is centred on. */
+  onZoomIntent: ((x: number, y: number, dz: number) => void) | null;
   /** Set by navigation to cancel an in-flight spring, e.g. when a gesture becomes a flight. */
   cancelZoom(): void;
 }
@@ -82,16 +83,28 @@ export function attachInput(
       else if (e.deltaMode === 2) dy *= view().h;
       const dz = Math.max(-MAX_WHEEL_STEP, Math.min(MAX_WHEEL_STEP, -dy * WHEEL_SCALE));
       const p = local(e);
-      // Latch the anchor for the whole gesture including its inertial tail, so the spring does not
-      // slide off the point the user aimed at.
-      input.anchorX = p.x;
-      input.anchorY = p.y;
-      // Navigation gets first refusal: if the cursor is over something far too small to zoom into by
-      // hand, it takes the gesture and flies there instead.
-      if (dz > 0 && input.onZoomIntent?.(p.x, p.y, dz)) {
-        wake();
-        return;
-      }
+      input.hoverX = p.x;
+      input.hoverY = p.y;
+      /**
+       * ZOOM IS ANCHORED AT THE MIDDLE OF THE SCREEN, NOT AT THE CURSOR.
+       *
+       * Cursor-anchored zoom is the obvious choice and it is wrong here, for a reason that only shows up
+       * over a range this large: the anchor is a screen pixel, so the world point it names is known to
+       * about half a pixel -- and zooming AMPLIFIES that error by the zoom factor. Measured on the real
+       * page, a stationary cursor over a star drifted 0.25 px after one notch, 12 px after eight, 61 px
+       * after twelve, and 457 px after seventeen, doubling every 1.7 notches, exactly in proportion to the
+       * scale. The maths was exact; the aim cannot be. Seventy-six doublings turns any sub-pixel error into
+       * a screen, so the thing you were pointing at slides away and then leaves -- "it just shoots off in
+       * random directions".
+       *
+       * The middle of the screen has no such error, so that is where the wheel goes. Choosing what is in
+       * the middle is a separate, deliberate act: drag, or double-click a thing to hold it there.
+       */
+      input.anchorX = view().w / 2;
+      input.anchorY = view().h / 2;
+      // Scrolling with the cursor squarely on something means "closer to that", so it takes over the
+      // middle of the screen and the zoom converges on it instead of diverging away from it.
+      if (dz > 0) input.onZoomIntent?.(p.x, p.y, dz);
       input.zTarget += dz;
       wake();
     },
@@ -130,11 +143,13 @@ export function attachInput(
     if (pointers.size >= 2) {
       const d = spread(pointers);
       if (pinchDist > 0 && d > 0) {
-        const c = centroid(pointers);
-        input.anchorX = c.x;
-        input.anchorY = c.y;
+        // Centred, for the same reason the wheel is: see the note on the wheel handler. Two fingers name a
+        // point no more precisely than one cursor does, and the amplification does not care which.
+        const v = view();
+        input.anchorX = v.w / 2;
+        input.anchorY = v.h / 2;
         // Fingers already smooth the motion, so pinch bypasses the spring and applies directly.
-        zoomAt(cam, c.x, c.y, Math.log2(d / pinchDist), view());
+        zoomAt(cam, v.w / 2, v.h / 2, Math.log2(d / pinchDist), v);
         input.zTarget = cam.z;
       }
       pinchDist = d;

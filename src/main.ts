@@ -1,4 +1,4 @@
-import { createCamera, frameToNode, nodeToFrame, type View } from './camera/camera.ts';
+import { createCamera, frameToNode, nodeToFrame, pxPerUnit, type View } from './camera/camera.ts';
 import { R_ENTER } from './camera/rebase.ts';
 import { commonDepth, planFlight, positionInAncestor, stepFlight, type Flight } from './camera/flyto.ts';
 import { ascend, updateFocus } from './camera/rebase.ts';
@@ -31,11 +31,6 @@ const ROOT_Z = 8 - LEVELS[ROOT_KIND].logSpan;
 let view: View = { w: 0, h: 0 };
 let flight: Flight | null = null;
 /**
- * True when the current flight was started by back/forward. Such a flight must NOT push a history
- * entry when it lands: the entry it is flying towards already exists, and pushing would clobber the
- * forward stack, so forward would silently stop working.
- */
-/**
  * The thing the view is locked onto, if any. Double-click sets it; panning, rising and travelling clear it.
  *
  * This exists because of one specific complaint: "I should be able to zoom into anything, which is a
@@ -46,7 +41,14 @@ let flight: Flight | null = null;
  * zooming.
  */
 let tracked: readonly Cell[] | null = null;
+/** False while the view is still gliding onto `tracked`; true once it is holding it exactly. */
+let acquired = false;
 
+/**
+ * True when the current flight was started by back/forward. Such a flight must NOT push a history
+ * entry when it lands: the entry it is flying towards already exists, and pushing would clobber the
+ * forward stack, so forward would silently stop working.
+ */
 let flightFromHistory = false;
 let lastHits: readonly HitEntry[] = [];
 let lastSignature = '';
@@ -126,7 +128,6 @@ function resize(): void {
 const EPOCH = Date.now();
 let motion = true;
 
-
 /**
  * Put the tracked node back in the middle of the screen. Runs every frame, before `updateFocus`, so the
  * focus machinery then descends into whatever is under the camera -- which is the tracked node.
@@ -135,7 +136,7 @@ let motion = true;
  * they are simultaneously representable: the camera's own frame is normalised to radius 1 precisely so
  * that nothing ever has to hold a coordinate spanning the whole ladder.
  */
-function followTracked(): void {
+function followTracked(dt: number): void {
   if (!tracked) return;
   const target = tree.resolve(tracked);
   if (!target) {
@@ -156,9 +157,42 @@ function followTracked(): void {
     return;
   }
   const [fx, fy] = nodeToFrame(cam, nx, ny);
-  cam.fx = fx;
-  cam.fy = fy;
+
+  /**
+   * Eased on the way in, exact once there. A hard snap makes acquiring a lock a lurch of up to half a
+   * screen, and the same lurch every time a scroll takes something over; easing makes it a glide. See
+   * ACQUIRED_PX for why the glide then hands over to an exact hold rather than easing forever.
+   */
+  const dx = fx - cam.fx;
+  const dy = fy - cam.fy;
+  if (acquired) {
+    cam.fx = fx;
+    cam.fy = fy;
+    return;
+  }
+  if (Math.hypot(dx, dy) * pxPerUnit(cam) < ACQUIRED_PX) {
+    acquired = true;
+    cam.fx = fx;
+    cam.fy = fy;
+    return;
+  }
+  const step = Math.min(1, ACQUIRE_RATE * dt);
+  cam.fx += dx * step;
+  cam.fy += dy * step;
 }
+
+/** How fast the view slides onto a thing it has just locked onto, per second. */
+const ACQUIRE_RATE = 11;
+/**
+ * Gap at which the glide gives up and simply holds the thing, in pixels.
+ *
+ * Generous on purpose. An exponential ease never actually arrives at a MOVING target: it settles at a lag
+ * of about one time constant's worth of the target's travel, which for a planet on a ninety-second orbit is
+ * a couple of pixels -- so a threshold tight enough to look exact was never crossed and the lock trailed
+ * the crosshair forever. Eight pixels is invisible as a final hop and comfortably wider than anything below
+ * a galaxy travels in a frame.
+ */
+const ACQUIRED_PX = 8;
 
 const loop = startLoop((dt) => {
   if (motion) setSimTime((Date.now() - EPOCH) / 1000);
@@ -180,7 +214,7 @@ const loop = startLoop((dt) => {
     }
   } else {
     moving = stepInput(cam, input, view, dt);
-    followTracked();
+    followTracked(dt);
     updateFocus(cam, tree, view);
     // Write the URL whenever the camera has actually moved, rather than only while input is active.
     // Keying off the input spring missed every programmatic move and left stale links behind.
@@ -216,8 +250,15 @@ const loop = startLoop((dt) => {
 
   hud.update(cam, stats, loop.fps, loop.frameMs);
   (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
-  // Ambient motion keeps the loop awake; without it the view would freeze mid-orbit when idle.
-  return moving || stats.spritesPending || motion;
+  /**
+   * Ambient motion keeps the loop awake; without it the view would freeze mid-orbit when idle.
+   *
+   * A lock does too, and must: `followTracked` only runs inside this callback, so a sleeping loop leaves the
+   * glide stranded part-way onto its target and stops following it once there. With ambient motion on that
+   * never showed, because the clock kept the loop running -- it only surfaced with motion frozen, which is
+   * how every automated check runs.
+   */
+  return moving || stats.spritesPending || motion || tracked !== null;
 });
 
 attachInput(canvas, cam, input, () => view, () => loop.wake());
@@ -243,6 +284,7 @@ input.onDoubleClick = (x, y) => {
   const hit = pick(x, y);
   flight = null;
   tracked = hit ? hit.path : null;
+  acquired = false;
   input.cancelZoom();
   input.zTarget = cam.z;
   loop.wake();
@@ -277,8 +319,6 @@ function doublingsAway(hit: HitEntry): number {
   return Math.log2(R_ENTER / Math.max(1e-12, hit.trueRPx));
 }
 
-/** Distance, in doublings, beyond which a gesture becomes a flight rather than a manual zoom. */
-const FLY_THRESHOLD_DOUBLINGS = 4;
 
 function travelTo(hit: HitEntry): boolean {
   const planned = planFlight(cam, tree, hit.path, view);
@@ -293,18 +333,50 @@ function travelTo(hit: HitEntry): boolean {
   return true;
 }
 
+/**
+ * THE WHEEL ZOOMS, and it zooms at the middle of the screen. See the note in pointer.ts for why the cursor
+ * is the wrong anchor over a range this big.
+ *
+ * What this hook does is decide what the middle of the screen IS. Scrolling in with the cursor squarely on
+ * something takes that thing as the destination: the view eases until it is centred, and from then on the
+ * zoom converges on it. The wheel used to instead hand the whole gesture to a two-second flight whenever
+ * the cursor was near anything small -- measured, 13% of the screen at galaxy zoom, to one of 283 different
+ * stars -- so about one scroll in eight teleported you somewhere you had not asked to go.
+ *
+ * "Squarely on" means within the thing's own drawn glyph, not the fifteen-pixel assist radius that makes
+ * four-pixel dots clickable. Scroll over the gaps and nothing is taken over; the view zooms where it is
+ * pointing already.
+ */
 input.onZoomIntent = (x, y) => {
-  if (flight) return false;
-  // Locked on: scrolling means "closer to that", never "off to whatever the cursor happens to be over".
-  // The lock already pins it to the middle of the screen, so the only thing worth taking over for is the
-  // long haul -- seventeen doublings between a system view and one of its planets is thirty-odd notches of
-  // wheel, and the flight covers it in two seconds and lands with the planet carrying the camera.
-  const hit = tracked ? pick(view.w / 2, view.h / 2) : pick(x, y);
-  if (!hit) return false;
-  if (tracked && !samePath(hit.path, tracked)) return false;
-  if (doublingsAway(hit) <= FLY_THRESHOLD_DOUBLINGS) return false;
-  return travelTo(hit);
+  if (flight) return;
+
+  // Squarely on something, and not already holding it: take it as the destination.
+  const under = pick(x, y);
+  if (under && Math.hypot(under.xPx - x, under.yPx - y) <= Math.max(3, under.rPx)) {
+    if (!tracked || !samePath(under.path, tracked)) {
+      tracked = under.path;
+      acquired = false;
+      return;
+    }
+  }
+
+  /**
+   * Holding something, settled on it, and it is still further away than anyone could scroll: fly.
+   *
+   * The threshold is deliberately high. A galaxy and one of its stars are 29 doublings apart, which is
+   * about fifty notches of wheel -- a gap the wheel cannot reasonably cross, and the one the flight exists
+   * for. Anything nearer than eight doublings is left to the wheel, because a flight is not a zoom and
+   * substituting one for the other is what made this feel unpredictable in the first place. Whatever
+   * happens, it can only ever go to the thing already marked in the middle of the screen.
+   */
+  if (!tracked || !acquired) return;
+  const at = pick(view.w / 2, view.h / 2);
+  if (!at || !samePath(at.path, tracked)) return;
+  if (doublingsAway(at) > LOCKED_FLY_DOUBLINGS) travelTo(at);
 };
+
+/** Gap, in doublings, past which scrolling toward a thing you are holding becomes a flight instead. */
+const LOCKED_FLY_DOUBLINGS = 8;
 
 function samePath(a: readonly Cell[], b: readonly Cell[]): boolean {
   if (a.length !== b.length) return false;
@@ -351,11 +423,13 @@ window.addEventListener('keydown', (e) => {
     case '_':
       zoomKey(-1, view.w / 2, view.h / 2);
       break;
+    // Q and E used to zoom at the cursor. Everything zooms at the middle of the screen now -- see the note
+    // in pointer.ts -- so they are a second pair of zoom keys for whichever hand is already there.
     case 'q':
-      zoomKey(1, input.hoverX, input.hoverY);
+      zoomKey(1, view.w / 2, view.h / 2);
       break;
     case 'e':
-      zoomKey(-1, input.hoverX, input.hoverY);
+      zoomKey(-1, view.w / 2, view.h / 2);
       break;
     case 'Backspace':
     case 'u':

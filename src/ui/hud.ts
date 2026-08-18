@@ -37,6 +37,12 @@ export function createHud(root: HTMLElement, tree: Tree, onCrumb: (depth: number
   scale.className = 'scalebar';
   root.appendChild(scale);
 
+  // Which build you are looking at. Small and dim, because it is an identity rather than something to read.
+  const stamp = document.createElement('div');
+  stamp.className = 'stamp';
+  stamp.textContent = __BUILD__;
+  root.appendChild(stamp);
+
   trail.addEventListener('click', (e) => {
     const target = (e.target as HTMLElement).closest('[data-depth]');
     if (!target) return;

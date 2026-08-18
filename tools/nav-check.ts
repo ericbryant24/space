@@ -221,11 +221,14 @@ const main = async () => {
   );
   if (afterDrag !== null) fail(`dragging left the view still locked onto "${afterDrag}"`);
 
-  // 9. One scroll notch toward a star at galaxy level must land inside that star's system.
+  // 9. Scrolling with the cursor on a star at galaxy level must take you INTO that star, not somewhere else.
   //
-  // This is the check for the whole point of scattered placement: a galaxy's visible stars ARE its
-  // catalogued systems, so aiming at one and scrolling has to go there. It cannot be a unit test --
-  // it needs a real wheel event, the analytic star pick, the flight planner, and thirty rebases.
+  // This is the check for the whole point of scattered placement -- a galaxy's visible stars are its
+  // catalogued systems, so aiming at one and scrolling has to go there -- and for the zoom model that
+  // replaced the old one. A notch used to hand the gesture straight to a two-second flight, which is what
+  // made 13% of the screen a teleporter to somewhere you had not asked for. Now the star takes over the
+  // middle of the screen and scrolling closes the distance, so the assertion is in two parts: the star is
+  // centred, and continuing to scroll arrives.
   await page.goto(BASE, { waitUntil: 'load' });
   await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 15000 });
   await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
@@ -237,12 +240,16 @@ const main = async () => {
   const atGalaxy = await state(page);
   if (atGalaxy.kind !== 'galaxy') fail(`could not reach galaxy focus; stopped at ${atGalaxy.kind}`);
   const star = await page.evaluate(() => {
-    const w = window as unknown as { __pick(x: number, y: number): { kind: string; r: number } | null };
-    // Scan on a coarse grid: a few hundred stars are on screen, so this finds one in a few dozen tries.
-    for (let y = 80; y < 720; y += 11) {
-      for (let x = 220; x < 1060; x += 11) {
+    const w = window as unknown as {
+      __pick(x: number, y: number): { kind: string; path: string; x: number; y: number; r: number } | null;
+    };
+    // Squarely ON a star, not merely within its assist radius -- that is what the zoom hook requires.
+    for (let y = 80; y < 720; y += 7) {
+      for (let x = 220; x < 1060; x += 7) {
         const h = w.__pick(x, y);
-        if (h && h.kind === 'system') return { x, y, r: h.r };
+        if (h && h.kind === 'system' && Math.hypot(h.x - x, h.y - y) <= Math.max(3, h.r)) {
+          return { x: h.x, y: h.y, path: h.path, r: h.r };
+        }
       }
     }
     return null;
@@ -250,12 +257,29 @@ const main = async () => {
   if (!star) fail('no catalogued star was pickable at galaxy focus');
   await page.mouse.move(star.x, star.y);
   await page.mouse.wheel(0, -120);
+  await settle(page, 30);
+  const took = await page.evaluate(() => (window as unknown as { __tracked(): string | null }).__tracked());
+  if (took !== star.path) fail(`scrolling on a star took over "${took}", expected "${star.path}"`);
+  const centred = await page.evaluate((want: string) => {
+    const w = window as unknown as {
+      __pick(x: number, y: number): { path: string; x: number; y: number } | null;
+    };
+    const h = w.__pick(window.innerWidth / 2, window.innerHeight / 2);
+    if (!h || h.path !== want) return Number.POSITIVE_INFINITY;
+    return Math.hypot(h.x - window.innerWidth / 2, h.y - window.innerHeight / 2);
+  }, star.path);
+  if (!(centred <= 1)) fail(`the star did not come to the middle of the screen (${centred}px off)`);
+
+  // Keep scrolling: it has to arrive, and it has to arrive at that star.
+  for (let i = 0; i < 40 && (await state(page)).kind === 'galaxy'; i++) {
+    await page.mouse.wheel(0, -120);
+    await settle(page, 6);
+  }
   await rest(page);
   const arrived = await state(page);
-  console.log(`star      r=${star.r.toFixed(1)}px  one notch -> ${arrived.kind} depth ${arrived.path.split('/').filter(Boolean).length}`);
-  if (arrived.kind !== 'system') {
-    fail(`one scroll notch at a star landed on ${arrived.kind}, expected system`);
-  }
+  console.log(`star      r=${star.r.toFixed(1)}px  centred to ${centred.toFixed(2)}px, then scrolled into ${arrived.kind}`);
+  if (arrived.kind !== 'system') fail(`scrolling into a star landed on ${arrived.kind}, expected system`);
+  if (!star.path.startsWith(arrived.path)) fail(`landed in "${arrived.path}", which is not the star aimed at`);
 
   // 10. A garbage URL must not break the page.
   await page.goto(`${BASE}#s=!!!&p=zz.-1-oops&k=-9&z=NaN&o=x,y`, { waitUntil: 'load' });
