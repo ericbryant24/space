@@ -27,7 +27,15 @@ const DRAW_BUDGET = 12000;
 const CELL_BUDGET = 24000;
 const LABEL_BUDGET = 90;
 const LABEL_MIN_PX = 26;
-const HIT_MIN_PX = 6;
+/** Anything at least this big on screen becomes a click target. */
+const HIT_MIN_PX = 2.5;
+/**
+ * Minimum click radius. A galaxy seen from its cluster is about four pixels across, so hit-testing
+ * against the drawn radius would make it effectively unclickable. Enlarging the target does not create
+ * ambiguity: the hit list is walked backwards, and children are recorded after their parents, so the
+ * deepest thing under the cursor still wins.
+ */
+const HIT_GRAB_PX = 10;
 
 export interface HitEntry {
   path: readonly Cell[];
@@ -379,9 +387,10 @@ function drawLabel(ctx: CanvasRenderingContext2D, node: Node, sx: number, sy: nu
 export function hitTest(hits: readonly HitEntry[], sx: number, sy: number): HitEntry | null {
   for (let i = hits.length - 1; i >= 0; i--) {
     const h = hits[i]!;
+    const grab = Math.max(h.rPx, HIT_GRAB_PX);
     const dx = sx - h.xPx;
     const dy = sy - h.yPx;
-    if (dx * dx + dy * dy <= h.rPx * h.rPx) return h;
+    if (dx * dx + dy * dy <= grab * grab) return h;
   }
   return null;
 }

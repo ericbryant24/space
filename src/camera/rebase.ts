@@ -3,7 +3,6 @@ import type { Tree } from '../universe/tree.ts';
 import { LEVELS } from '../universe/schema.ts';
 import {
   frameToNode,
-  nodeToFrame,
   pxPerNodeUnit,
   pxPerUnit,
   setNodeCoords,
@@ -140,5 +139,3 @@ export function absolutePosition(cam: Camera, tree: Tree): [number, number] {
   }
   return [nx, ny];
 }
-
-export { nodeToFrame };

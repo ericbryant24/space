@@ -78,7 +78,11 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   const edge = 1 - dist;
   if (edge < 0.12 && f01(hash(id, 0x05)) > edge / 0.12) return null;
 
-  return { cell, id, kind, logSpan, ox, oy, rel };
+  // Copy the cell rather than retaining the caller's object. The renderer reuses one mutable cell
+  // across its whole iteration for speed, and retaining it aliased every child's path to whichever
+  // cell the loop last touched -- which silently corrupted node cache keys and made click-to-fly
+  // resolve to an empty cell and do nothing.
+  return { cell: { cx: cell.cx, cy: cell.cy }, id, kind, logSpan, ox, oy, rel };
 }
 
 export function makeChild(parent: Node, ref: ChildRef): Node {

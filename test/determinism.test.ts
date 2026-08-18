@@ -152,6 +152,53 @@ test('children never escape their parent disc', () => {
   }
 });
 
+test('childAt does not retain the caller\'s cell object', () => {
+  // The renderer reuses one mutable cell object for its whole traversal. If childAt keeps that
+  // reference, every path it produces aliases the last cell visited: node cache keys collide and
+  // click-to-fly resolves to an empty cell.
+  const root = rootNode(0x5151);
+  const scratch = { cx: 0, cy: 0 };
+  const refs: { cx: number; cy: number }[] = [];
+  const n = 2 ** anchorLevel(root.kind);
+  for (let cx = 0; cx < n; cx++) {
+    for (let cy = 0; cy < n; cy++) {
+      scratch.cx = cx;
+      scratch.cy = cy;
+      const c = childAt(root, scratch);
+      if (c) refs.push(c.cell);
+    }
+  }
+  assert.ok(refs.length > 3, 'expected several children to compare');
+  // Mutating the scratch object afterwards must not disturb anything already returned.
+  scratch.cx = 999;
+  scratch.cy = 999;
+  const distinct = new Set(refs.map((c) => `${c.cx},${c.cy}`));
+  assert.equal(distinct.size, refs.length, 'returned cells alias each other');
+  assert.ok(!distinct.has('999,999'), 'a returned cell tracked the caller\'s mutation');
+});
+
+test('a node resolved from a rendered path is the node that was rendered', () => {
+  // End-to-end version of the same bug: paths handed out by traversal must resolve back.
+  const tree = new Tree(0x764a);
+  const scratch = { cx: 0, cy: 0 };
+  const n = 2 ** anchorLevel(tree.root.kind);
+  let checked = 0;
+  for (let cx = 0; cx < n && checked < 12; cx++) {
+    for (let cy = 0; cy < n && checked < 12; cy++) {
+      scratch.cx = cx;
+      scratch.cy = cy;
+      const ref = childAt(tree.root, scratch);
+      if (!ref) continue;
+      const built = makeChild(tree.root, ref);
+      const resolved = tree.resolve(built.path);
+      assert.ok(resolved, `path ${JSON.stringify(built.path)} failed to resolve`);
+      assert.equal(resolved.id, built.id);
+      checked++;
+    }
+  }
+  assert.ok(checked > 0, 'expected to check some children');
+});
+
 test('anchorCellAt inverts the cell centre it names', () => {
   const node = rootNode(3);
   const k = anchorLevel(node.kind);
