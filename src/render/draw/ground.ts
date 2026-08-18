@@ -557,7 +557,7 @@ export function drawPlanetBody(
     id,
     traits,
     seaR,
-    cells,
+    cells + 1,
     (i) => thetaOf(i * step),
     (i) => rad[i * step]!,
     beachDepth(traits, r, PLANET_METRES),
@@ -581,23 +581,25 @@ export function drawPlanetBody(
    */
   const shallow = Math.max(2 / r, depth * 2.2);
   {
-    let open = false;
+    // One subpath per submerged stretch: out along the sea bed, back along the top of the shallow water. A single
+    // path that zig-zagged between the two would fill as a comb of triangles rather than as a band.
     ctx.beginPath();
-    for (let i = 0; i <= samples; i++) {
-      const bed = rad[i]!;
-      if (bed < seaR) {
-        const top = Math.min(seaR, bed + shallow);
-        if (!open) {
-          ctx.moveTo(px(i, bed), py(i, bed));
-          open = true;
-        } else {
-          ctx.lineTo(px(i, bed), py(i, bed));
-        }
-        ctx.lineTo(px(i, top), py(i, top));
-        ctx.lineTo(px(i, bed), py(i, bed));
-      } else {
-        open = false;
+    let i = 0;
+    while (i <= samples) {
+      if (rad[i]! >= seaR) {
+        i++;
+        continue;
       }
+      const a = i;
+      while (i <= samples && rad[i]! < seaR) i++;
+      const b = i - 1;
+      ctx.moveTo(px(a, rad[a]!), py(a, rad[a]!));
+      for (let j = a + 1; j <= b; j++) ctx.lineTo(px(j, rad[j]!), py(j, rad[j]!));
+      for (let j = b; j >= a; j--) {
+        const top = Math.min(seaR, rad[j]! + shallow);
+        ctx.lineTo(px(j, top), py(j, top));
+      }
+      ctx.closePath();
     }
     ctx.fillStyle = css(lit(atLuminance(s.sea, Math.min(0.72, luminanceOf(s.sea) + 0.16))));
     ctx.fill();
