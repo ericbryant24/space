@@ -2,32 +2,29 @@ import { createCamera, frameToNode, nodeToFrame, pxPerUnit, type View } from './
 import { R_ENTER } from './camera/rebase.ts';
 import { commonDepth, planFlight, positionInAncestor, stepFlight, type Flight } from './camera/flyto.ts';
 import { ascend, updateFocus } from './camera/rebase.ts';
-import { setSimTime } from './core/clock.ts';
+import { setSimTime, simTime } from './core/clock.ts';
+import { climateAt, sunAt } from './culture/climate.ts';
+import { biosphereOf, describeBiosphere } from './culture/biosphere.ts';
 import { startLoop } from './core/loop.ts';
-import { attachInput, createInput, stepInput } from './input/pointer.ts';
-import {
-  drawHover,
-  drawLock,
-  hitTest,
-  render,
-  scatterHitAt,
-  setRecordAllHits,
-  type HitEntry,
-} from './render/renderer.ts';
+import { attachInput, createInput, flingBy, stepInput } from './input/pointer.ts';
+import { drawHover, drawLock, render, setRecordAllHits, type HitEntry } from './render/renderer.ts';
+import { pickAt, type PickResult } from './render/pick.ts';
 import {
   childNear,
   childrenNear,
   groundHeightAt,
   isInhabited,
   makeChild,
+  orbitalChildren,
   rimChild,
   rimChildren,
   seaHeightOf,
   type Cell,
 } from './universe/node.ts';
+import { HABITABLE_THRESHOLD } from './universe/gen/planet.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
-import { houseCount } from './render/draw/houses.ts';
+import { houseCount } from './render/draw/structures.ts';
 import { createBookmarks } from './ui/bookmarks.ts';
 import { createHud } from './ui/hud.ts';
 import { DEFAULT_SEED, Router, stateOf, type CameraState } from './ui/router.ts';
@@ -76,15 +73,8 @@ const router = new Router((state) => {
     location.reload();
     return;
   }
-  if (state.path) {
-    const planned = planFlight(cam, tree, state.path, view);
-    if (planned) {
-      flight = planned;
-      flightFromHistory = true;
-      loop.wake();
-      return;
-    }
-  }
+  // Retraced, not snapped -- and from history, so landing must not push a fresh entry.
+  if (state.path && startFlight(state.path, true)) return;
   applyState(state);
   lastSignature = cameraSignature();
   loop.wake();
@@ -107,8 +97,7 @@ const hud = createHud(overlay, tree, (depth) => flyToDepth(depth));
 const bookmarks = createBookmarks(
   overlay,
   (state) => {
-    flight = null;
-    tracked = null;
+    cancelFlight();
     applyState(state);
     router.push(stateOf(cam, seed));
     loop.wake();
@@ -155,8 +144,10 @@ function applyState(state: Partial<CameraState>): void {
   cam.fx = state.fx ?? 0;
   cam.fy = state.fy ?? 0;
   cam.z = state.z ?? ROOT_Z;
-  input.zTarget = cam.z;
   updateFocus(cam, tree, view);
+  // After the focus has settled, not before: a pasted z can be outside the reachable range, and the spring
+  // must be aimed at where the camera actually ended up rather than at what the URL asked for.
+  input.cancelZoom();
 }
 
 function resize(): void {
@@ -249,9 +240,7 @@ const loop = startLoop((dt) => {
     // A flight owns the camera; user input would fight it.
     if (stepFlight(flight, cam, tree, view, dt)) {
       const fromHistory = flightFromHistory;
-      flight = null;
-      flightFromHistory = false;
-      input.zTarget = cam.z;
+      cancelFlight();
       lastSignature = cameraSignature();
       // Arriving from back/forward: update the URL in place, never push, or forward breaks.
       if (fromHistory) router.replace(stateOf(cam, seed));
@@ -262,7 +251,16 @@ const loop = startLoop((dt) => {
   } else {
     moving = stepInput(cam, input, view, dt);
     followTracked(dt);
+    const zBefore = cam.z;
     updateFocus(cam, tree, view);
+    /**
+     * `updateFocus` clamps `z` in three places -- the bottom of the ladder, the root, and where the ground would
+     * leave the picture -- and every one of them has to be told to the spring, or the spring spends the rest of
+     * the session pulling against a wall. That is not just wasted work: the anchor keeps being applied, so a
+     * camera held at a limit slides steadily toward whatever the pointer was last over, and the loop never
+     * sleeps. Rebase itself never touches z, so a change here can only mean a clamp.
+     */
+    if (cam.z !== zBefore) input.cancelZoom();
     // Write the URL whenever the camera has actually moved, rather than only while input is active.
     // Keying off the input spring missed every programmatic move and left stale links behind.
     const signature = cameraSignature();
@@ -296,6 +294,7 @@ const loop = startLoop((dt) => {
 
   hud.update(cam, stats, loop.fps, loop.frameMs);
   (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
+  (window as unknown as Record<string, unknown>).__lastStats = stats;
   /**
    * Ambient motion keeps the loop awake; without it the view would freeze mid-orbit when idle.
    *
@@ -328,23 +327,21 @@ input.onClick = (x, y) => {
  */
 input.onDoubleClick = (x, y) => {
   const hit = pick(x, y);
-  flight = null;
+  cancelFlight();
   tracked = hit ? hit.path : null;
   acquired = false;
-  input.cancelZoom();
-  input.zTarget = cam.z;
   loop.wake();
 };
 
 /**
- * What is under a screen point.
+ * What is under a screen point, filtered to things worth going to.
  *
- * The frame's hit list covers everything drawn at true scale, and the analytic lookup covers a galaxy's
- * few thousand catalogued stars, which are too numerous to record. The star wins when both match,
- * because it is the deeper, more specific thing.
+ * The lookup itself lives in render/pick.ts, which knows about all three ways a child can be placed --
+ * including the rim slots that a planet's own disc is drawn instead of, and which therefore appear in no
+ * hit list. What is left here is the one policy decision that belongs to navigation rather than geometry.
  */
-function pick(x: number, y: number): HitEntry | null {
-  const hit = scatterHitAt(cam, view, x, y) ?? hitTest(lastHits, x, y);
+function pick(x: number, y: number): PickResult | null {
+  const hit = pickAt(cam, tree, view, lastHits, x, y);
   /**
    * The focus node and its ANCESTORS are not targets: they fill most of the screen, so they win almost every pick
    * made in the empty space between their children, and travelling to where you already are is a two-second flight
@@ -383,17 +380,46 @@ function doublingsAway(hit: HitEntry): number {
 }
 
 
-function travelTo(hit: HitEntry): boolean {
-  const planned = planFlight(cam, tree, hit.path, view);
+/**
+ * THE ONE WAY A FLIGHT BEGINS.
+ *
+ * Every caller goes through here, and that is the whole point of it existing. A flight, a lock and the zoom
+ * spring are three different things all trying to drive the same camera, and they used to be set up
+ * independently at half a dozen call sites: launching a flight while still tracking something meant
+ * `followTracked` dragged the camera back towards the old node every frame of the trip, and leaving the
+ * spring pointed at the zoom the gesture had been heading for meant the view lurched the moment the flight
+ * ended. Clearing all three in one place is what makes those states impossible rather than merely unlikely.
+ */
+function startFlight(path: readonly Cell[], fromHistory = false): boolean {
+  const planned = planFlight(cam, tree, path, view);
   if (!planned) return false;
-  // A flight is a different way of saying "put me there", and it ends with the target as the focus node --
-  // which carries the camera by itself. Holding a lock through one would fight it every frame.
-  tracked = null;
   flight = planned;
-  flightFromHistory = false;
+  flightFromHistory = fromHistory;
+  // A flight ends with the target as the focus node, which carries the camera by itself. Holding a lock
+  // through one would fight it every frame.
+  tracked = null;
+  acquired = false;
   input.cancelZoom();
   loop.wake();
   return true;
+}
+
+/**
+ * Abandon a flight where it stands, leaving the camera exactly where the tween had got to.
+ *
+ * Resyncing the spring is not optional: `zTarget` still holds whatever the zoom was doing before the flight
+ * took over, so simply dropping the flight handed the camera to a spring aimed somewhere else entirely and
+ * the view snapped. That was true of every place that cleared `flight` by hand, which is why they all come
+ * through here now.
+ */
+function cancelFlight(): void {
+  flight = null;
+  flightFromHistory = false;
+  input.cancelZoom();
+}
+
+function travelTo(hit: PickResult): boolean {
+  return startFlight(hit.path);
 }
 
 /**
@@ -452,12 +478,7 @@ function samePath(a: readonly Cell[], b: readonly Cell[]): boolean {
 /** Fly to the ancestor at a given path depth. Used by the breadcrumb. */
 function flyToDepth(depth: number): void {
   if (depth >= cam.node.path.length) return;
-  const planned = planFlight(cam, tree, cam.node.path.slice(0, depth), view);
-  if (planned) {
-    flight = planned;
-    flightFromHistory = false;
-    loop.wake();
-  }
+  startFlight(cam.node.path.slice(0, depth));
 }
 
 /** Cycle through the children of the focus node, flying to each. Also the accessibility story. */
@@ -467,12 +488,7 @@ function tabToChild(backwards: boolean): void {
   const found = childrenNear(cam.node, nx, ny);
   if (found.length === 0) return;
   tabIndex = (tabIndex + (backwards ? -1 : 1) + found.length) % found.length;
-  const planned = planFlight(cam, tree, [...cam.node.path, found[tabIndex]!.cell], view);
-  if (planned) {
-    flight = planned;
-    flightFromHistory = false;
-    loop.wake();
-  }
+  startFlight([...cam.node.path, found[tabIndex]!.cell]);
 }
 
 window.addEventListener('keydown', (e) => {
@@ -496,11 +512,22 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'Backspace':
     case 'u':
-      flight = null;
+      cancelFlight();
       tracked = null;
       ascend(cam, tree);
-      input.zTarget = cam.z;
+      input.cancelZoom();
       router.push(stateOf(cam, seed));
+      break;
+    /**
+     * Escape is the brake: whatever the view was doing of its own accord, it stops doing it, and it stops
+     * where it is rather than snapping back or completing the move. A two-second flight you did not mean to
+     * start was previously something you had to sit through.
+     */
+    case 'Escape':
+      cancelFlight();
+      tracked = null;
+      acquired = false;
+      flingBy(input, 0, 0);
       break;
     case 'Enter':
     case 'f': {
@@ -524,8 +551,7 @@ window.addEventListener('keydown', (e) => {
       loop.wake();
       break;
     case 'Home':
-      flight = null;
-      tracked = null;
+      cancelFlight();
       applyState({ path: [], k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z: ROOT_Z });
       router.push(stateOf(cam, seed));
       break;
@@ -553,19 +579,20 @@ window.addEventListener('keydown', (e) => {
 });
 
 function zoomKey(dz: number, ax: number, ay: number): void {
-  flight = null;
-  flightFromHistory = false;
+  cancelFlight();
   input.anchorX = ax;
   input.anchorY = ay;
-  input.zTarget += dz;
+  // Through `zoomBy`, so a key held down against the top or the bottom of the ladder cannot walk the target
+  // off past where the camera is able to follow it.
+  input.zoomBy(dz);
 }
 
 function nudge(dx: number, dy: number): void {
-  flight = null;
+  cancelFlight();
   tracked = null;
-  flightFromHistory = false;
-  input.velX = dx * 0.25;
-  input.velY = dy * 0.25;
+  // Asked for as a distance in pixels: the arrow keys mean "move the view about this far", and how the
+  // inertia gets it there is the input layer's business.
+  flingBy(input, dx, dy);
 }
 
 // Respect a stated preference for less movement: orbits and clouds hold still.
@@ -585,17 +612,35 @@ updateFocus(cam, tree, view);
  * zooming into empty void is legitimate behaviour but never reaches the ground.
  */
 function diveStep(dz = 0.5): void {
-  flight = null;
+  aimStep();
+  zoomStep(dz);
+}
+
+/**
+ * Re-centre on the nearest child WITHOUT zooming.
+ *
+ * Split out from `diveStep` for the pop detector, which measures how much the picture changes between two
+ * frames and compares that against the change the zoom alone accounts for. Zoom is anchored at the screen
+ * centre, so a pure zoom step transforms the image by exactly a scale about the centre and the residual is
+ * the pop. Re-aiming translates as well, which the model cannot subtract -- so the harness has to be able to
+ * ask for the two separately and skip the frame after an aim.
+ */
+function aimStep(): void {
+  cancelFlight();
   const [nx, ny] = frameToNode(cam, cam.fx, cam.fy);
   const ref = childNear(cam.node, nx, ny);
-  if (ref) {
-    const [fx, fy] = nodeToFrame(cam, ref.ox, ref.oy);
-    cam.fx = fx;
-    cam.fy = fy;
-  }
+  if (!ref) return;
+  const [fx, fy] = nodeToFrame(cam, ref.ox, ref.oy);
+  cam.fx = fx;
+  cam.fy = fy;
+}
+
+/** Zoom, and nothing else. Every rebase it triggers is invisible to the renderer by construction. */
+function zoomStep(dz: number): void {
+  cancelFlight();
   cam.z += dz;
-  input.zTarget = cam.z;
   updateFocus(cam, tree, view);
+  input.cancelZoom();
   loop.wake();
 }
 
@@ -615,6 +660,67 @@ Object.assign(window as unknown as Record<string, unknown>, {
    * without `updateFocus` doing anything about it, so the focus never changes and the search never moves. This
    * rebases properly, one slot per step, landing at the neighbour's centre.
    */
+  /**
+   * Step to a sibling planet until one is habitable enough for anyone to live on.
+   *
+   * For the review harness. Only about one world in eight is habitable, and diving straight down picks a planet by
+   * where its orbit happens to be, so the surface shots kept landing on five-hundred-kelvin cinders -- honest
+   * places, and places with no buildings, no language and no name for themselves.
+   */
+  __seekHabitable: (): boolean => {
+    loop.wake();
+    const here = cam.node.ground?.traits;
+    if (here && here.habitability >= HABITABLE_THRESHOLD) return true;
+    const parent = tree.parentOf(cam.node);
+    if (!parent || parent.kind !== 'system') return false;
+    for (const ref of orbitalChildren(parent)) {
+      const candidate = makeChild(parent, ref);
+      if ((candidate.ground?.traits.habitability ?? 0) < HABITABLE_THRESHOLD) continue;
+      cam.node = candidate;
+      cam.k = 0;
+      cam.cx = 0;
+      cam.cy = 0;
+      cam.fx = 0;
+      cam.fy = 0;
+      return true;
+    }
+    return false;
+  },
+  /**
+   * Advance the frozen clock until the star is well up at the camera's own angle round the rim.
+   *
+   * For the review harness. Half of every world is in night at any instant and a night shot tells you nothing
+   * about the colours, so this walks the clock in eighths of a day and stops at the brightest hour it finds.
+   */
+  /** One line about the ground under the camera, for the review harnesses. */
+  __describeHere: (): string => {
+    const g = cam.node.ground;
+    if (!g) return '';
+    const c = climateAt(g.planetId, g.traits, g.theta);
+    const sun = sunAt(g.planetId, g.traits, g.theta, simTime());
+    return (
+      `${g.traits.label} / ${c.biome} ${c.temp.toFixed(0)}K wet ${c.moisture.toFixed(2)} / ` +
+      `sun ${sun.elevation.toFixed(2)} / ${describeBiosphere(biosphereOf(g.planetId))}`
+    );
+  },
+  __seekDaylight: (): number => {
+    const g = cam.node.ground;
+    if (!g) return 0;
+    let best = 0;
+    let bestElev = -2;
+    const day = g.traits.dayLength * 3600;
+    for (let i = 0; i < 24; i++) {
+      const t = (i / 24) * day;
+      const e = sunAt(g.planetId, g.traits, g.theta, t).elevation;
+      if (e > bestElev) {
+        bestElev = e;
+        best = t;
+      }
+    }
+    setSimTime(best);
+    loop.wake();
+    return bestElev;
+  },
   __seekInhabited: (limit = 800): boolean => {
     // Waking is not optional. Teleporting the camera without it leaves the render loop asleep, so the next
     // screenshot is the frame from BEFORE the jump -- which read as houses drawn in the wrong place.
@@ -646,6 +752,8 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __loop: loop,
   __input: input,
   __diveStep: diveStep,
+  __aimStep: aimStep,
+  __zoomStep: zoomStep,
   /** Freeze the clock at a fixed instant so screenshots and perf runs are reproducible. */
   __freezeTime: (seconds: number): void => {
     motion = false;
@@ -655,7 +763,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
   /** What the last frame considered clickable, for the end-to-end navigation check. */
   /** Diagnostic for the navigation check: what a click at this point would resolve to. */
   __probeClick: (x: number, y: number) => {
-    const hit = hitTest(lastHits, x, y);
+    const hit = pickAt(cam, tree, view, lastHits, x, y);
     if (!hit) return { hit: null, flight: null };
     const planned = planFlight(cam, tree, hit.path, view);
     return {
@@ -708,6 +816,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
     const stats = render(ctx, cam, tree, view);
     const ms = performance.now() - t0;
     (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
+  (window as unknown as Record<string, unknown>).__lastStats = stats;
     return ms;
   },
 });
