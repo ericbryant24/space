@@ -1,7 +1,7 @@
 import { RELIEF, detailForScale, groundAt, seaRadiusOf } from '../../culture/terrain.ts';
 import { climateAt } from '../../culture/climate.ts';
 import { atLuminance, css, luminanceOf, shade, type Hsl } from '../color.ts';
-import { outlineWidth } from '../bands.ts';
+import { outlineWidth, smoothstep } from '../bands.ts';
 import { LEVELS } from '../../universe/schema.ts';
 import { angleAtOffset, groundHeightAt, seaHeightOf, type Ground, type Node } from '../../universe/node.ts';
 import { surfaceColours, type Surface } from './planet.ts';
@@ -51,6 +51,15 @@ export const PLATE_RIND = 0.16;
 /** Concentric steps down through a planet's interior. Three, because three flat steps read as depth. */
 const INTERIOR_BANDS = 3;
 
+/**
+ * Where the disc stops drawing and its regions take over, in screen diagonals.
+ *
+ * The reciprocal of PLATE_RIND, and the renderer's PLANET_MAX_DIAGONALS is the same number -- it lives there
+ * because that is where the decision is made, and here because the disc has to know how long it has left in
+ * order to fade its interior out before it goes.
+ */
+const PLANET_MAX_DIAGONALS_LOCAL = 1 / PLATE_RIND;
+
 /** One planet radius, in metres. Fixed by the ladder, so the disc painter can ask for real depths without a node. */
 const PLANET_METRES = 2 ** LEVELS.planet.logSpan;
 
@@ -66,9 +75,39 @@ const PLANET_METRES = 2 ** LEVELS.planet.logSpan;
  * the handover. Set once per frame by the renderer, exactly like `beginStructureFrame`.
  */
 let frameSky: Sky | null = null;
+/** The viewport, for the same reason: the disc painter has no view argument and most of a big disc is off screen. */
+let frameView = { w: 0, h: 0, diagonal: 1 };
 
-export function beginGroundFrame(sky: Sky | null): void {
+export function beginGroundFrame(sky: Sky | null, w: number, h: number): void {
   frameSky = sky;
+  frameView = { w, h, diagonal: Math.hypot(w, h) };
+}
+
+/**
+ * The stretch of a planet's rim that could possibly be on screen, as an angle either side of the viewport.
+ *
+ * By the time the disc hands over to its regions it is six screens across, so five sixths of every curve it
+ * traces is outside the window -- and the ground line, the material runs and the beds of rock were all spread
+ * evenly over the whole of it. What you could actually see got a sixth of the detail it was paying for, and the
+ * frame paid thirteen octaves a sample for the rest. This is the same clamp a plate applies to its own span,
+ * in polar form: the law of cosines on the triangle made by the planet's centre, the middle of the viewport and
+ * a point on the surface. Null means the whole circle is in play, which is the common case and the cheap one.
+ */
+function visibleArc(cx: number, cy: number, r: number): { from: number; to: number } | null {
+  const { w, h, diagonal } = frameView;
+  if (r < diagonal) return null;
+  const vx = w / 2 - cx;
+  const vy = h / 2 - cy;
+  const d = Math.hypot(vx, vy);
+  const reach = diagonal / 2 + r * PLATE_RIND;
+  if (d <= reach) return null;
+  const cosHalf = (r * r + d * d - reach * reach) / (2 * r * d);
+  if (!(cosHalf > -1) || cosHalf > 1) return cosHalf > 1 ? { from: 0, to: 0 } : null;
+  // A margin of a couple of degrees, so a fill's chord never cuts a visible corner.
+  const half = Math.acos(cosHalf) + 0.04;
+  const mid = Math.atan2(vy, vx);
+  if (half >= Math.PI) return null;
+  return { from: mid - half, to: mid + half };
 }
 
 /** Trace the ground line across the plate, in local units, left to right. */
@@ -396,29 +435,41 @@ export function drawPlanetBody(
    * either way. So the runs are classified on a grid `step` times coarser and their indices scaled back up, which
    * keeps the fine curve for the shapes and pays for the climate once per visible feature.
    */
-  const curve = Math.max(96, Math.min(1400, Math.round(r * 1.6)));
-  const grid = Math.max(72, Math.min(360, Math.round(r * 0.45)));
+  const arc = visibleArc(cx, cy, r);
+  const span = arc ? arc.to - arc.from : Math.PI * 2;
+  if (span <= 0) return;
+  const start = arc ? arc.from : 0;
+  const curve = Math.max(96, Math.min(1400, Math.round(((r * span) / Math.PI) * 0.8)));
+  const grid = Math.max(72, Math.min(360, Math.round(((r * span) / Math.PI) * 0.22)));
   const step = Math.max(1, Math.round(curve / grid));
   const cells = Math.max(24, Math.round(curve / step));
   const samples = cells * step;
 
+  const thetaOf = (i: number) => start + (span * i) / samples;
   const rad = new Float64Array(samples + 1);
-  for (let i = 0; i <= samples; i++) {
-    rad[i] = groundAt(id, traits, (i / samples) * Math.PI * 2, detail);
-  }
+  for (let i = 0; i <= samples; i++) rad[i] = groundAt(id, traits, thetaOf(i), detail);
 
-  const px = (i: number, radius: number) => cx + Math.cos((i / samples) * Math.PI * 2) * radius * r;
-  const py = (i: number, radius: number) => cy + Math.sin((i / samples) * Math.PI * 2) * radius * r;
+  const px = (i: number, radius: number) => cx + Math.cos(thetaOf(i)) * radius * r;
+  const py = (i: number, radius: number) => cy + Math.sin(thetaOf(i)) * radius * r;
 
-  /** The surface itself, as one closed curve. On a two-dimensional world this IS the coastline. */
-  const surfaceCurve = (): void => {
+  /**
+   * The surface itself. On a two-dimensional world this IS the coastline.
+   *
+   * Closed round the whole rim when the whole rim is in play, and closed THROUGH THE PLANET'S CENTRE when only
+   * an arc of it is -- a wedge rather than a ring. A partial arc filled on its own closes with a chord across
+   * the front of the disc, which would leave the rock cut off in a straight line down the screen; the wedge
+   * covers everything beneath the visible surface and nothing that is on screen falls outside it.
+   */
+  const surfacePath = (wedge: boolean): void => {
     ctx.beginPath();
+    if (wedge) ctx.moveTo(cx, cy);
     for (let i = 0; i <= samples; i++) {
-      if (i === 0) ctx.moveTo(px(i, rad[i]!), py(i, rad[i]!));
+      if (i === 0 && !wedge) ctx.moveTo(px(i, rad[i]!), py(i, rad[i]!));
       else ctx.lineTo(px(i, rad[i]!), py(i, rad[i]!));
     }
     ctx.closePath();
   };
+  const surfaceCurve = () => surfacePath(arc !== null);
 
   // Deep enough that the deepest sea bed still has rock under it, and set to match what a region plate paints, so
   // the handover from disc to plates changes nothing about how thick the living world is. See PLATE_RIND.
@@ -442,8 +493,17 @@ export function drawPlanetBody(
   ctx.fillStyle = css(rockTone);
   ctx.fill();
 
-  // 3. The interior, drawn OVER the body so the rind stays a rind rather than the whole disc being one colour.
-  for (let b = 0; b < INTERIOR_BANDS; b++) {
+  /**
+   * 3. The interior, drawn OVER the body so the rind stays a rind rather than the whole disc being one colour.
+   *
+   * Faded out as the disc grows past a couple of screens, and that is the last thing that differed across the
+   * handover. A plate paints uniform rock beneath its ground line, because from down there the core of the world
+   * is thousands of kilometres away and out of the picture; the disc painted its concentric steps right up to the
+   * moment it stopped drawing, so a band of interior blinked out of existence as the regions took over. By the
+   * switch at PLANET_MAX_DIAGONALS the disc is uniform rock below the rind, which is exactly what a plate paints.
+   */
+  const interior = 1 - smoothstep(2.5 * frameView.diagonal, PLANET_MAX_DIAGONALS_LOCAL * frameView.diagonal, r);
+  for (let b = 0; interior > 0.004 && b < INTERIOR_BANDS; b++) {
     const t = b / (INTERIOR_BANDS - 1);
     ctx.beginPath();
     ctx.arc(cx, cy, r * crust * (1 - (b / INTERIOR_BANDS) * 0.78), 0, Math.PI * 2);
@@ -454,15 +514,18 @@ export function drawPlanetBody(
           Math.max(0.035, luminanceOf(s.land) * (0.3 - t * 0.2)),
         ),
       ),
+      interior,
     );
     ctx.fill();
   }
   // A core, in the star's own shadow hue: the one warm thing in a cold interior, and the only thing the middle of a
   // two-dimensional world has to say for itself.
-  ctx.beginPath();
-  ctx.arc(cx, cy, r * crust * 0.13, 0, Math.PI * 2);
-  ctx.fillStyle = css(lit(atLuminance(shade(s.land, shadowHue, 1.4), 0.15)));
-  ctx.fill();
+  if (interior > 0.004) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * crust * 0.13, 0, Math.PI * 2);
+    ctx.fillStyle = css(lit(atLuminance(shade(s.land, shadowHue, 1.4), 0.15)), interior);
+    ctx.fill();
+  }
 
   /**
    * 4. The beds of rock in the rind, from the same geometric family the plates draw.
@@ -495,7 +558,7 @@ export function drawPlanetBody(
     traits,
     seaR,
     cells,
-    (i) => ((i * step) / samples) * Math.PI * 2,
+    (i) => thetaOf(i * step),
     (i) => rad[i * step]!,
     beachDepth(traits, r, PLANET_METRES),
   );
@@ -540,10 +603,11 @@ export function drawPlanetBody(
     ctx.fill();
   }
 
-  // 7. The surface in ink, over everything, because it is the edge of the world.
+  // 7. The surface in ink, over everything, because it is the edge of the world. Never the wedge: a stroked
+  // wedge would draw two spokes out to the centre of the planet.
   const w = outlineWidth(r, GROUND_INK_PX);
   if (w > 0) {
-    surfaceCurve();
+    surfacePath(false);
     ctx.lineWidth = w;
     ctx.strokeStyle = css(lit(s.coast));
     ctx.stroke();

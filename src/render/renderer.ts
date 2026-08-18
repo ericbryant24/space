@@ -298,7 +298,7 @@ export function render(
   frame.sky = buildSky(frame, cxF, cyF);
   // The planet's own disc is reached through the space-mode painter, which has no sky argument to take one, so
   // it is handed the frame's sky here instead. See `beginGroundFrame`.
-  beginGroundFrame(frame.sky);
+  beginGroundFrame(frame.sky, view.w, view.h);
   if (drawGround(frame)) stats.draws++;
 
   /**
