@@ -10,7 +10,12 @@ import { join } from 'node:path';
 import { chromium, type Page } from 'playwright';
 
 const BASE = process.env.SHOT_BASE ?? 'http://localhost:5173/space/';
-const FRAMES = Number(process.env.PERF_FRAMES ?? 300);
+/**
+ * Enough frames that p99 is a genuine tail statistic. At 100 frames the 99th percentile IS the maximum,
+ * so a single 30 ms bake failed the budget gate and read as a regression -- which cost me a round of
+ * chasing a spike that was really a sampling artefact.
+ */
+const FRAMES = Number(process.env.PERF_FRAMES ?? 400);
 const BUDGET_MS = Number(process.env.PERF_BUDGET_MS ?? 16);
 
 function chromiumPath(): string | undefined {
@@ -76,8 +81,10 @@ const main = async () => {
 
   await browser.close();
 
-  // `settle` is the first render at a new view, which pays for sprite bakes; `max` is the worst frame
-  // seen afterwards, usually another bake finishing. Steady-state cost is p50.
+  // `settle` is the first render at a new view, which pays for sprite bakes. `p50` is the steady-state
+  // cost and the number that matters. `max` is the single worst frame and will occasionally show a bake
+  // or a collection; it is reported but deliberately not gated, because gating on it means gating on
+  // luck.
   console.log(`level             settle     p50     p99     max   draws   (${FRAMES} frames each)`);
   for (const r of rows) {
     console.log(

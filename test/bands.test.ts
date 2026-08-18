@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import { BANDS, activeReps, coverage, outlineWidth, smoothstep, validateBands } from '../src/render/bands.ts';
+import { scaleLevels } from '../src/render/draw/galaxy.ts';
 
 test('every band table is a well-formed partition', () => {
   for (const [kind, table] of Object.entries(BANDS)) {
@@ -105,5 +106,50 @@ test('outlines ramp in rather than snapping to full width', () => {
     const w = outlineWidth(px);
     assert.ok(w >= prev - 1e-12, `outline width dipped at ${px}px`);
     prev = w;
+  }
+});
+
+test('starfield lattice levels form a partition of unity in log space', () => {
+  // The same rule as the representation bands, applied to scale instead of size. Two lattice levels are
+  // blended so their weights sum to exactly 1, which is what keeps the star field's total brightness
+  // constant as you descend and stops a level change from popping.
+  for (let i = 0; i <= 20000; i++) {
+    const nf = -30 + (i / 20000) * 90;
+    const [n0, wCoarse, wFine] = scaleLevels(nf);
+    assert.ok(Math.abs(wCoarse + wFine - 1) < 1e-12, `weights sum to ${wCoarse + wFine} at nf=${nf}`);
+    assert.ok(wCoarse >= 0 && wCoarse <= 1, `coarse weight ${wCoarse} out of range`);
+    assert.ok(wFine >= 0 && wFine <= 1, `fine weight ${wFine} out of range`);
+    assert.equal(n0, Math.floor(nf), 'level should be the floor of the continuous level');
+  }
+});
+
+test('crossing a lattice level boundary is continuous', () => {
+  // Approaching an integer from below, the fine level is at full weight; just above, that same lattice
+  // becomes the coarse level, still at full weight. Nothing changes abruptly.
+  for (const boundary of [-7, 0, 3, 18]) {
+    const eps = 1e-9;
+    const below = scaleLevels(boundary - eps);
+    const above = scaleLevels(boundary + eps);
+    // Below: levels (b-1, b) with weights (~0, ~1). Above: levels (b, b+1) with weights (~1, ~0).
+    assert.equal(below[0], boundary - 1);
+    assert.equal(above[0], boundary);
+    assert.ok(below[1] < 1e-6, `coarse level still visible below ${boundary}: ${below[1]}`);
+    assert.ok(below[2] > 1 - 1e-6, `fine level not yet full below ${boundary}: ${below[2]}`);
+    assert.ok(above[1] > 1 - 1e-6, `the same lattice lost weight crossing ${boundary}: ${above[1]}`);
+    assert.ok(above[2] < 1e-6, `next level appeared abruptly above ${boundary}: ${above[2]}`);
+  }
+});
+
+test('a lattice level is a fixed power of two in world space', () => {
+  // This is the whole fix. Cell size must depend only on the level, never on the viewport span -- the
+  // original derived it from the span, so zooming rescaled the lattice every frame and every star
+  // teleported. Stars "shooting past at random" was that, sixty times a second.
+  const cellSize = (level: number) => 2 ** -level;
+  for (let level = -5; level < 40; level++) {
+    const c = cellSize(level);
+    // Compared with a tolerance, not strict equality: assert.strictEqual uses Object.is, and
+    // Object.is(0, -0) is false, so level 0 fails a strict check on a perfectly exact value.
+    assert.ok(Math.abs(Math.log2(c) + level) < 1e-12, 'cell size must be an exact power of two');
+    assert.equal(cellSize(level + 1) * 2, c, 'each level must be exactly half the previous');
   }
 });

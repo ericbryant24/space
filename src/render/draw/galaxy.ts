@@ -1,4 +1,4 @@
-import { f01, hash3, mix, sm32 } from '../../core/rng.ts';
+import { f01, hash3, hash4, mix, sm32 } from '../../core/rng.ts';
 import { armDensity, type GalaxyTraits } from '../../universe/gen/galaxy.ts';
 import { css, shade, type Hsl } from '../color.ts';
 import { outlineWidth } from '../bands.ts';
@@ -385,33 +385,41 @@ export function drawGalaxyStandIn(
 
 
 /**
- * What you see when you are INSIDE a galaxy.
+ * SCALE QUANTISATION -- the idea both the cloud and the starfield depend on.
  *
- * There is a window of roughly a dozen doublings where the galaxy is far larger than the viewport (so
- * its silhouette is meaningless) but individual star systems are still sub-pixel. Before this existed
- * that window rendered as a completely blank screen -- twelve doublings of nothing, which is exactly
- * the "everything in between" the project is supposed to deliver.
+ * The first version derived its lattice spacing and its noise frequency from the viewport span, with a
+ * comment saying this kept stars still "while panning". That was true, and it missed the gesture people
+ * actually use: while ZOOMING the span changes every frame, so the lattice rescaled every frame and
+ * every star jumped to a new position. The reported symptom was stars shooting past at random, and that
+ * is exactly what it was -- the field was being re-randomised sixty times a second.
  *
- * What belongs there is physically unambiguous: at that distance individual stars are unresolved, so
- * you are looking at the collective glow of the arm you are inside. That is drawn by sampling the same
- * `armDensity` field the arms and blob come from, at low resolution, and upscaling it smoothly.
+ * The fix is to anchor everything to POWERS OF TWO in galaxy space, so a given level's features have
+ * fixed positions no matter how the camera moves, and to blend two adjacent levels with weights that
+ * form a partition of unity in log space:
  *
- * The scattered points on top are unresolved star clouds, not objects: they carry no label and are not
- * click targets, so nothing is claimed to be enterable that is not. Systems that ARE resolvable get
- * drawn by the normal traversal as soon as they exceed the minimum size.
+ *     w(n) = max(0, 1 - |nf - n|)      sums to exactly 1 for any nf
+ *
+ * Only two levels are ever non-zero. Coarse features drift outward with correct parallax and dim as
+ * they spread; finer ones fade in between them. That is what an infinite starfield actually looks like.
  */
-const WASH_W = 64;
-const WASH_H = 40;
+export function scaleLevels(nf: number): [number, number, number] {
+  const n0 = Math.floor(nf);
+  const frac = nf - n0;
+  return [n0, 1 - frac, frac];
+}
 
-/** Smooth value noise on an integer lattice. Cheap, stateless, and deterministic. */
-function vnoise(x: number, y: number): number {
-  const xi = Math.floor(x);
-  const yi = Math.floor(y);
-  const fx = x - xi;
-  const fy = y - yi;
+/** Smooth value noise on a lattice of the given level, anchored in galaxy space. */
+function noiseAtLevel(x: number, y: number, level: number, salt: number): number {
+  const f = 2 ** level;
+  const px = x * f;
+  const py = y * f;
+  const xi = Math.floor(px);
+  const yi = Math.floor(py);
+  const fx = px - xi;
+  const fy = py - yi;
   const sx = fx * fx * (3 - 2 * fx);
   const sy = fy * fy * (3 - 2 * fy);
-  const at = (i: number, j: number) => f01(hash3(i, j, 0x9e37));
+  const at = (i: number, j: number) => f01(hash4(i, j, level, salt));
   const a = at(xi, yi);
   const b = at(xi + 1, yi);
   const c = at(xi, yi + 1);
@@ -419,22 +427,24 @@ function vnoise(x: number, y: number): number {
   return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy;
 }
 
-/**
- * Fractional Brownian motion. The base frequency is tied to the VIEWPORT span rather than to galaxy
- * space, so there is visible cloud structure at every depth. Without this the wash is a flat wall of
- * colour once you are deep inside a single arm, where armDensity is essentially constant.
- */
-function fbm(x: number, y: number, baseFreq: number): number {
-  let sum = 0;
-  let amp = 0.5;
-  let freq = baseFreq;
-  for (let o = 0; o < 3; o++) {
-    sum += vnoise(x * freq, y * freq) * amp;
-    freq *= 2.07;
-    amp *= 0.5;
-  }
-  return sum / 0.875;
+/** Two octaves anchored at a fixed level, so the texture does not swim as the camera moves. */
+function cloudAt(x: number, y: number, level: number): number {
+  return noiseAtLevel(x, y, level, 0x9e37) * 0.62 + noiseAtLevel(x, y, level - 1, 0x51a3) * 0.38;
 }
+
+/**
+ * Clustering weight for stars. One octave, not two: stars only need to gather where the cloud is thick,
+ * and this runs once per lattice cell per level -- the single hottest loop in the renderer.
+ */
+function clusterAt(x: number, y: number, level: number): number {
+  return noiseAtLevel(x, y, level, 0x9e37);
+}
+
+const WASH_W = 64;
+const WASH_H = 40;
+/** Target on-screen size of one cloud feature and one starfield cell, in pixels. */
+const CLOUD_FEATURE_PX = 300;
+const STAR_PITCH_PX = 38;
 
 export function drawGalaxyInterior(
   ctx: CanvasRenderingContext2D,
@@ -456,8 +466,8 @@ export function drawGalaxyInterior(
   const nearestY = Math.max(y0, Math.min(0, y1));
   if (Math.hypot(nearestX, nearestY) > 1.05) return;
 
-  // Roughly three cloud features across the screen, whatever the depth.
-  const baseFreq = 3 / Math.max(1e-30, x1 - x0);
+  const pxPerUnit = viewW / Math.max(1e-300, x1 - x0);
+  const [cloudLevel, wCoarse, wFine] = scaleLevels(Math.log2(pxPerUnit / CLOUD_FEATURE_PX));
 
   const { surface, ctx: wctx } = getScratch(WASH_W);
   const p = t.palette;
@@ -470,7 +480,8 @@ export function drawGalaxyInterior(
       const gx = x0 + ((i + 0.5) / WASH_W) * (x1 - x0);
       const density = armDensity(t, gx, gy);
       if (density <= 0.02) continue;
-      const texture = fbm(gx, gy, baseFreq);
+      const texture =
+        cloudAt(gx, gy, cloudLevel) * wCoarse + cloudAt(gx, gy, cloudLevel + 1) * wFine;
       // Diffuse, unresolved emission: dim and additive, never a covering layer.
       const a = density * (0.25 + 0.75 * texture) * 0.3;
       if (a < 0.01) continue;
@@ -491,23 +502,25 @@ export function drawGalaxyInterior(
   ctx.globalCompositeOperation = 'source-over';
   ctx.imageSmoothingEnabled = smoothing;
 
-  drawUnresolvedStars(ctx, t, x0, x1, y0, y1, viewW, viewH, baseFreq);
+  drawStarfield(ctx, t, x0, x1, y0, y1, viewW, viewH, pxPerUnit, cloudLevel);
 }
 
 /**
- * Point stars at a fixed SCREEN pitch, so the field stays similarly dense at every depth. This is not
- * a cheat: real starfields are self-similar under magnification, because stars are point sources that
- * never resolve into discs however far you zoom.
+ * Point stars on a power-of-two lattice in galaxy space.
  *
- * Drawing matters as much as generating here. Two thousand separate fillRect calls, each preceded by a
- * fillStyle change and wrapped in `globalCompositeOperation = 'lighter'`, produced a periodic 210 ms
- * stall -- roughly every nineteenth frame, presumably a flush of the additive-blend path. Batching the
- * points into one path per colour and dropping additive blending removed it entirely, at no visible
- * cost against a dark ground.
+ * Star positions are therefore FIXED: zooming moves them outward with correct parallax instead of
+ * shuffling them. Two lattice levels are drawn, weighted so their contributions sum to one, so finer
+ * stars fade in between coarser ones as you descend and nothing ever pops.
+ *
+ * Drawing matters as much as generating. Two thousand separate fillRect calls, each preceded by a
+ * fillStyle change and wrapped in additive blending, produced a periodic 210 ms stall, so the points
+ * are batched into one path per colour per level.
  */
-const TONE_COUNT = 3;
-const MAX_POINTS = 6000;
-// Reused across frames so a full starfield costs no allocation at all.
+const TONE_COUNT = 4;
+const MAX_POINTS = 9000;
+/** Defensive bound: never iterate more lattice cells than this per level. */
+const MAX_CELLS = 24000;
+
 const pointX: Float32Array[] = [];
 const pointY: Float32Array[] = [];
 const pointS: Float32Array[] = [];
@@ -519,7 +532,7 @@ for (let i = 0; i < TONE_COUNT; i++) {
   pointN.push(0);
 }
 
-function drawUnresolvedStars(
+function drawStarfield(
   ctx: CanvasRenderingContext2D,
   t: GalaxyTraits,
   x0: number,
@@ -528,56 +541,83 @@ function drawUnresolvedStars(
   y1: number,
   viewW: number,
   viewH: number,
-  baseFreq: number,
+  pxPerUnit: number,
+  cloudLevel: number,
 ): void {
-  const PITCH_PX = 26;
-  const cols = Math.ceil(viewW / PITCH_PX);
-  const rows = Math.ceil(viewH / PITCH_PX);
   const p = t.palette;
+  // Blending two levels splits each star's light between them, so the tones sit brighter than they
+  // would for a single-level field. A handful of stars are brighter and larger than the rest, because a
+  // field of uniform dots reads as dust rather than as stars.
+  const tones = [css(p.PAPER, 1), css(p.LIGHT, 0.92), css(p.ACCENT, 0.8), css(p.PAPER, 1)];
+  const [level, wCoarse, wFine] = scaleLevels(Math.log2(pxPerUnit / STAR_PITCH_PX));
 
+  for (const [n, weight] of [
+    [level, wCoarse],
+    [level + 1, wFine],
+  ] as const) {
+    if (weight <= 0.004) continue;
+    emitLevel(t, x0, x1, y0, y1, viewW, viewH, n, cloudLevel);
+    ctx.globalAlpha = weight;
+    for (let tone = 0; tone < TONE_COUNT; tone++) {
+      const count = pointN[tone]!;
+      if (count === 0) continue;
+      const xs = pointX[tone]!;
+      const ys = pointY[tone]!;
+      const ss = pointS[tone]!;
+      ctx.fillStyle = tones[tone]!;
+      ctx.beginPath();
+      for (let k = 0; k < count; k++) ctx.rect(xs[k]!, ys[k]!, ss[k]!, ss[k]!);
+      ctx.fill();
+    }
+  }
+  ctx.globalAlpha = 1;
+}
+
+/** Fill the point buffers with one lattice level's stars, in screen coordinates. */
+function emitLevel(
+  t: GalaxyTraits,
+  x0: number,
+  x1: number,
+  y0: number,
+  y1: number,
+  viewW: number,
+  viewH: number,
+  level: number,
+  cloudLevel: number,
+): void {
   for (let i = 0; i < TONE_COUNT; i++) pointN[i] = 0;
 
-  // Quantise the sampling grid to galaxy space so stars stay put while panning rather than crawling.
-  const spanX = (x1 - x0) / cols;
-  const spanY = (y1 - y0) / rows;
-  const i0 = Math.floor(x0 / spanX);
-  const j0 = Math.floor(y0 / spanY);
+  const cell = 2 ** -level; // galaxy units, a fixed power of two
+  const i0 = Math.floor(x0 / cell);
+  const i1 = Math.floor(x1 / cell);
+  const j0 = Math.floor(y0 / cell);
+  const j1 = Math.floor(y1 / cell);
+  if ((i1 - i0 + 2) * (j1 - j0 + 2) > MAX_CELLS) return;
+
   const sxScale = viewW / (x1 - x0);
   const syScale = viewH / (y1 - y0);
 
-  for (let j = 0; j <= rows + 1; j++) {
-    for (let i = 0; i <= cols + 1; i++) {
-      const gi = i0 + i;
-      const gj = j0 + j;
-      const h = hash3(gi, gj, 0x5747);
-      const jx = (gi + f01(h)) * spanX;
-      const jy = (gj + f01(mix(h, 1))) * spanY;
-      const arm = armDensity(t, jx, jy);
+  for (let j = j0; j <= j1 + 1; j++) {
+    for (let i = i0; i <= i1 + 1; i++) {
+      const h = hash4(i, j, level, 0x5747);
+      // Fixed position within a fixed cell: the star lives at this point in galaxy space forever.
+      const gx = (i + f01(h)) * cell;
+      const gy = (j + f01(mix(h, 1))) * cell;
+      const arm = armDensity(t, gx, gy);
       if (arm <= 0.02) continue;
       // Stars cluster where the cloud is thick, so the field and the wash agree.
-      const d = arm * (0.35 + 0.9 * fbm(jx, jy, baseFreq));
+      const d = arm * (0.35 + 0.9 * clusterAt(gx, gy, cloudLevel));
       if (f01(mix(h, 2)) > d * 0.95) continue;
-      const tone = (h >>> 9) % TONE_COUNT;
+      // Tone 3 is the rare bright one: about one star in fourteen.
+      const roll = (h >>> 9) % 42;
+      const tone = roll < 3 ? 3 : roll % 3;
       const n = pointN[tone]!;
       if (n >= MAX_POINTS) continue;
-      const size = 1 + Math.floor(f01(mix(h, 3)) * 2.2);
-      pointX[tone]![n] = (jx - x0) * sxScale - size / 2;
-      pointY[tone]![n] = (jy - y0) * syScale - size / 2;
+      const size = (tone === 3 ? 2 : 1) + Math.floor(f01(mix(h, 3)) * 2.2);
+      pointX[tone]![n] = (gx - x0) * sxScale - size / 2;
+      pointY[tone]![n] = (gy - y0) * syScale - size / 2;
       pointS[tone]![n] = size;
       pointN[tone] = n + 1;
     }
-  }
-
-  const tones = [css(p.PAPER, 0.92), css(p.LIGHT, 0.82), css(p.ACCENT, 0.72)];
-  for (let tone = 0; tone < TONE_COUNT; tone++) {
-    const n = pointN[tone]!;
-    if (n === 0) continue;
-    const xs = pointX[tone]!;
-    const ys = pointY[tone]!;
-    const ss = pointS[tone]!;
-    ctx.fillStyle = tones[tone]!;
-    ctx.beginPath();
-    for (let k = 0; k < n; k++) ctx.rect(xs[k]!, ys[k]!, ss[k]!, ss[k]!);
-    ctx.fill();
   }
 }
