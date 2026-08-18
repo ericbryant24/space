@@ -31,8 +31,14 @@ import {
   systemStarRadius,
 } from './draw/containers.ts';
 import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
-import { PLATE_RIND, drawSurfacePlate } from './draw/ground.ts';
-import { beginStructureFrame } from './draw/houses.ts';
+import { PLATE_RIND, beginGroundFrame, drawSurfacePlate } from './draw/ground.ts';
+import { upAngleFor } from '../camera/orientation.ts';
+import { beginStructureFrame } from './draw/structures.ts';
+import { computeSky, paintSky, type Sky } from './draw/sky.ts';
+import { metallicityAt, metallicityOf } from '../cosmic/metallicity.ts';
+import { groundHeightAt } from '../universe/node.ts';
+import { groundAt } from '../culture/terrain.ts';
+import { simTime } from '../core/clock.ts';
 import type { PlanetTraits } from '../universe/gen/planet.ts';
 import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
 
@@ -170,6 +176,27 @@ interface Frame {
   childAlpha: number;
   /** On-screen radius of the node whose scattered children are being drawn. Sizes their symbols. */
   scatterParentPx: number;
+  /**
+   * The sky over the world the camera is standing on, or null out in space.
+   *
+   * Computed ONCE per frame, and it has to be: the star is at infinity, so every plate on screen must place it
+   * at the same point or the sky gains a parallax that a star cannot have. Plates then paint it themselves,
+   * because a plate is what knows where its own ground is -- which gets the horizon occluding a setting star
+   * for nothing.
+   */
+  sky: Sky | null;
+  /** The enclosing galaxy's ore chemistry, which is what a wall four levels down is made of. */
+  ore: { hue: number; metallicity: number };
+  /**
+   * How far the whole scene is turned so that "away from the planet's centre" points up the screen.
+   *
+   * Zero everywhere except while the camera's focus is a planet it is already standing on -- see
+   * src/camera/orientation.ts. Applied to the screen mapping rather than to the canvas, so `stats.hits` and every
+   * other screen measurement come out in final screen space and nothing downstream has to know about it.
+   */
+  up: number;
+  cosUp: number;
+  sinUp: number;
   stats: RenderStats;
 }
 
@@ -193,7 +220,24 @@ export function render(
   beginSpriteFrame();
   beginStructureFrame();
   const diagonal = Math.hypot(view.w, view.h);
-  const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, lastDrawnRadius: 0, childAlpha: 1, scatterParentPx: 0, stats };
+  const frame: Frame = {
+    ctx,
+    cam,
+    tree,
+    view,
+    r,
+    diagonal,
+    detailBias,
+    lastDrawnRadius: 0,
+    childAlpha: 1,
+    scatterParentPx: 0,
+    sky: null,
+    ore: oreFor(cam, tree),
+    up: 0,
+    cosUp: 1,
+    sinUp: 0,
+    stats,
+  };
 
   ctx.fillStyle = css(voidBackgroundFor(cam.node, tree));
   ctx.fillRect(0, 0, view.w, view.h);
@@ -245,9 +289,28 @@ export function render(
     drawGalaxyInterior(ctx, galaxyTraitsCached(sky.id), sky.nx, sky.ny, sky.halfW, sky.halfH, view.w, view.h);
     stats.draws++;
   }
-  // Standing on a world, the sky is not the galaxy: it is daylight. Painted over the glow rather than
-  // instead of it, so the handover is a crossfade rather than a switch.
+  /**
+   * Standing on a world, the sky is not the galaxy: it is daylight, at whatever time of day it is where you
+   * are. Painted over the glow rather than instead of it, so the handover is a crossfade rather than a switch.
+   *
+   * The sky is built here, once, because every plate has to agree about where the star is -- see Frame.sky.
+   */
+  frame.sky = buildSky(frame, cxF, cyF);
+  // The planet's own disc is reached through the space-mode painter, which has no sky argument to take one, so
+  // it is handed the frame's sky here instead. See `beginGroundFrame`.
+  beginGroundFrame(frame.sky);
   if (drawGround(frame)) stats.draws++;
+
+  /**
+   * WHICH WAY IS UP, decided once for the whole scene.
+   *
+   * Fed the sky's own `groundAlpha` so the world comes upright over exactly the range the daylight arrives over.
+   * The sky itself is painted above this line and stays in plain screen space: the whole point of the rotation is
+   * that the ground ends up horizontal, so a sky drawn horizontally is a sky that agrees with it.
+   */
+  frame.up = upAngleFor(cam, frame.sky ? frame.sky.groundAlpha : 0);
+  frame.cosUp = Math.cos(frame.up);
+  frame.sinUp = Math.sin(frame.up);
 
   paint(frame, node, centreX, centreY, ax, ay, 0);
   stats.spritesPending = spritesPending();
@@ -280,6 +343,22 @@ function childFrame(
  * a planet is genuinely a ten-thousandth of a pixel. Without threading it through, the minimum-size
  * cull discards the very thing a system view exists to show.
  */
+/**
+ * A point in camera-frame units, in final screen pixels.
+ *
+ * The scene rotation is applied HERE, to the offset from the camera, rather than to the canvas. That keeps every
+ * screen quantity the renderer hands out -- the hit list, the culling tests, the plate centres -- in the same
+ * space the pointer arrives in, so a rotated world is still a world you can click on without anyone downstream
+ * knowing there was a rotation. What is left for the canvas is the orientation of each shape, which travels with
+ * `spin`.
+ */
+function toScreen(frame: Frame, xF: number, yF: number): [number, number] {
+  const { cam, view, r, cosUp, sinUp } = frame;
+  const dx = (xF - cam.fx) * r;
+  const dy = (yF - cam.fy) * r;
+  return [view.w / 2 + dx * cosUp - dy * sinUp, view.h / 2 + dy * cosUp + dx * sinUp];
+}
+
 function paint(
   frame: Frame,
   node: Node,
@@ -292,9 +371,10 @@ function paint(
 ): void {
   const { ctx, cam, view, r, stats } = frame;
   const scale = ay === 0 ? Math.abs(ax) : Math.hypot(ax, ay);
-  // How far this node's frame is turned from the screen's. Non-zero only below a planet, where a node's own "up"
-  // is the direction away from the planet's centre -- see ChildRef.spin.
-  const spin = ay === 0 ? 0 : Math.atan2(ay, ax);
+  // How far this node's frame is turned from the screen's: its own turn within the camera's frame, plus however
+  // far the camera's frame has itself been turned to put the ground the right way up. Non-zero only below or on a
+  // planet, where a node's own "up" is the direction away from the planet's centre -- see ChildRef.spin.
+  const spin = (ay === 0 ? 0 : Math.atan2(ay, ax)) + frame.up;
   const trueRPx = scale * r;
   const rPx = schematic ? Math.max(trueRPx, PLANET_ICON_MIN_PX) : trueRPx;
   if (rPx < MIN_DRAW_PX) return;
@@ -303,9 +383,22 @@ function paint(
     return;
   }
 
-  const sx = view.w / 2 + (cxF - cam.fx) * r;
-  const sy = view.h / 2 + (cyF - cam.fy) * r;
-  if (sx + rPx < 0 || sy + rPx < 0 || sx - rPx > view.w || sy - rPx > view.h) return;
+  const [sx, sy] = toScreen(frame, cxF, cyF);
+  const level = LEVELS[node.kind];
+  /**
+   * How far this node's CONTENT can reach beyond its own disc.
+   *
+   * For a grid, an orbit or a scatter the answer is nothing: children live inside their parent. A RIM parent is
+   * different -- its children straddle its circumference, half of each one is sky, and each of their plates
+   * paints a screen diagonal of ground either side of it. So a planet whose own circle happens to miss the
+   * viewport by seven pixels is still the planet you are standing on.
+   *
+   * That was a real bug and a subtle one: the camera sits a little above the nominal radius when it is on high
+   * ground, which can put the disc just off the bottom of the screen, and culling the parent culled the ground
+   * with it. The screen went to bare sky, at one particular height, on one particular world.
+   */
+  const reach = level.placement === 'rim' ? rPx + frame.diagonal : rPx;
+  if (sx + reach < 0 || sy + reach < 0 || sx - reach > view.w || sy - reach > view.h) return;
 
   // A planet holds on to its own surface far longer than anything else, because its regions do not appear
   // until they are big enough to be areas -- see PLANET_MAX_DIAGONALS for both halves of that trade.
@@ -345,7 +438,6 @@ function paint(
      */
   }
 
-  const level = LEVELS[node.kind];
   if (!level.child || depth >= MAX_DEPTH) return;
 
 
@@ -396,8 +488,7 @@ function paint(
       const childR = ref.rel * scale * r;
       if (childR < floor) continue;
       const [kx, ky, kax, kay] = childFrame(cxF, cyF, ax, ay, ref);
-      const sx = view.w / 2 + (kx - cam.fx) * r;
-      const sy = view.h / 2 + (ky - cam.fy) * r;
+      const [sx, sy] = toScreen(frame, kx, ky);
       if (sx + childR < 0 || sy + childR < 0 || sx - childR > view.w || sy - childR > view.h) continue;
       paint(frame, makeChild(node, ref), kx, ky, kax, kay, depth + 1);
       if (stats.draws >= DRAW_BUDGET) {
@@ -505,14 +596,52 @@ function drawDisc(
     ctx.translate(sx, sy);
     ctx.rotate(spin);
     ctx.translate(-sx, -sy);
-    drawDiscUpright(frame, node, sx, sy, rPx, trueRPx, schematic);
+    drawDiscUpright(frame, node, sx, sy, rPx, trueRPx, schematic, spin);
     ctx.restore();
     return;
   }
-  drawDiscUpright(frame, node, sx, sy, rPx, trueRPx, schematic);
+  drawDiscUpright(frame, node, sx, sy, rPx, trueRPx, schematic, 0);
 }
 
-/** The body of `drawDisc`, with the canvas already turned to this node's own frame. */
+/**
+ * The stretch of a plate that is actually inside the window, in the plate's own local units.
+ *
+ * A plate keeps drawing until it is two and a half screen diagonals in radius, so at the coarse end of every rung
+ * most of it is off the edge of the window -- and the ground line, the tree lattice and the material runs were all
+ * spread evenly over the whole of it, spending six sevenths of their budget where nobody could see it. Four corners
+ * inverse-rotated into plate coordinates is ten flops and buys up to six times the resolution where you are looking.
+ */
+function visibleSpan(frame: Frame, sx: number, sy: number, rPx: number, spin: number): { from: number; to: number } {
+  const { view } = frame;
+  const cos = spin === 0 ? 1 : Math.cos(spin);
+  const sin = spin === 0 ? 0 : Math.sin(spin);
+  let lo = Infinity;
+  let hi = -Infinity;
+  for (const [x, y] of CORNERS) {
+    const dx = x * view.w - sx;
+    const dy = y * view.h - sy;
+    const u = (cos * dx + sin * dy) / rPx;
+    if (u < lo) lo = u;
+    if (u > hi) hi = u;
+  }
+  // A margin, so nothing thins out at the very edge of the window and every stroke's join has a neighbour.
+  const pad = Math.max(0.02, 8 / rPx);
+  return { from: lo - pad, to: hi + pad };
+}
+
+const CORNERS: readonly (readonly [number, number])[] = [
+  [0, 0],
+  [1, 0],
+  [0, 1],
+  [1, 1],
+];
+
+/**
+ * The body of `drawDisc`, with the canvas already turned to this node's own frame.
+ *
+ * `spin` is passed on as well as applied, because the surface painters need to UNDO it for anything at infinity:
+ * a star must not rotate with the ground under it.
+ */
 function drawDiscUpright(
   frame: Frame,
   node: Node,
@@ -521,6 +650,7 @@ function drawDiscUpright(
   rPx: number,
   trueRPx: number,
   schematic: boolean,
+  spin: number,
 ): void {
   const { ctx } = frame;
 
@@ -536,7 +666,10 @@ function drawDiscUpright(
    * which is what lets a single plate carry the whole view when it is the only thing drawing.
    */
   if (node.kind === 'region' || node.kind === 'settlement' || node.kind === 'building') {
-    drawSurfacePlate(ctx, sx, sy, rPx, node, frame.diagonal);
+    // No sky means no world to stand on, which can only happen above a planet -- and there are no plates there.
+    if (frame.sky) {
+      drawSurfacePlate(ctx, sx, sy, rPx, node, frame.diagonal, frame.sky, frame.ore, visibleSpan(frame, sx, sy, rPx, spin));
+    }
     return;
   }
 
@@ -690,32 +823,101 @@ function galaxyViewport(
  * Returns whether anything was drawn.
  */
 function drawGround(frame: Frame): boolean {
-  const { ctx, cam, tree, view, diagonal } = frame;
+  const { ctx, view, sky } = frame;
+  if (!sky || sky.groundAlpha < 0.01) return false;
+  ctx.globalAlpha = sky.groundAlpha;
+  ctx.fillStyle = css(sky.colour);
+  ctx.fillRect(0, 0, view.w, view.h);
+  // Everything overhead, once, before any ground: the terrain and the rooftops drawn after it are what occlude it.
+  paintSky(ctx, sky, 0, view.w);
+  ctx.globalAlpha = 1;
+  return true;
+}
+
+/**
+ * The sky over the world the camera is standing on, or null out in space.
+ *
+ * Everything a surface view needs about the heavens, worked out once: the time of day at the camera's own
+ * angle round the rim, where the star and the moons sit, what colour the air is, and the SCREEN Y OF THE
+ * HORIZON, which is what the whole stylised dome is hung from. The horizon comes from the focus node's own
+ * ground line rather than from the middle of the screen, so the sky stays put when the camera rises.
+ */
+function buildSky(frame: Frame, cxF: number, cyF: number): Sky | null {
+  const { cam, tree, view, r, diagonal } = frame;
   let node: Node | null = cam.node;
-  // One unit of the current node measured in units of whatever node we have climbed to.
   let unitScale = 1;
   for (let i = 0; i < 10 && node; i++) {
     if (node.kind === 'planet') break;
     const ref = tree.refOf(node);
     const parent: Node | null = tree.parentOf(node);
-    if (!ref || !parent) return false;
+    if (!ref || !parent) return null;
     unitScale *= ref.rel;
     node = parent;
   }
-  if (!node || node.kind !== 'planet' || !node.ground) return false;
-  const traits = node.ground.traits;
+  if (!node || node.kind !== 'planet' || !node.ground) return null;
 
-  // The planet's own radius on screen. `pxPerUnit` is per frame unit, and a frame is 2^-k of the focus
-  // node, which is itself `unitScale` of the planet.
-  const rPx = (pxPerUnit(cam) * 2 ** cam.k) / unitScale;
-  const alpha = smoothstep(1.1 * diagonal, 2.4 * diagonal, rPx);
-  if (alpha < 0.01) return false;
+  // The planet's own radius on screen. `pxPerUnit` is per frame unit, and a frame is 2^-k of the focus node,
+  // which is itself `unitScale` of the planet.
+  const planetPx = (pxPerUnit(cam) * 2 ** cam.k) / unitScale;
+  const groundAlpha = smoothstep(1.1 * diagonal, 2.4 * diagonal, planetPx);
+  if (groundAlpha < 0.005) return null;
 
-  ctx.globalAlpha = alpha;
-  ctx.fillStyle = css(skyTone(traits));
-  ctx.fillRect(0, 0, view.w, view.h);
-  ctx.globalAlpha = 1;
-  return true;
+  const focus = cam.node.ground;
+  const focusR = 2 ** cam.k * r;
+  const focusSy = view.h / 2 + (cyF - cam.fy) * r;
+
+  let theta: number;
+  let horizonY: number;
+  if (focus && cam.node.kind !== 'planet') {
+    // A plate in focus is drawn unturned with its ground line across it, so the horizon is that line.
+    theta = focus.theta;
+    horizonY = focusSy - groundHeightAt(focus, 0, 14) * focusR;
+  } else {
+    /**
+     * FOCUSED ON THE PLANET ITSELF, which is where most of the arrival happens: the disc has stopped drawing at
+     * six screens across and no region takes focus for another two doublings.
+     *
+     * The camera's own angle round the rim is what decides the time of day here -- it used to be hard-coded to
+     * zero, so through that whole stretch the sun sat wherever noon-at-longitude-nothing put it and then jumped
+     * when a region finally took over. And the horizon is where the ground under the camera actually is, which
+     * the scene rotation has just put directly below it: the camera stands `d` planet radii out and the ground
+     * reaches `ground`, so the difference is how far down the screen the surface lies.
+     */
+    const [x, y] = frameToNode(cam, cam.fx, cam.fy);
+    const d = Math.hypot(x, y);
+    theta = d > 1e-6 ? Math.atan2(y, x) : 0;
+    const ground = groundAt(node.id, node.ground.traits, theta, 14);
+    horizonY = d > 0.25 ? view.h / 2 + (d - ground) * planetPx : view.h * 0.62;
+  }
+
+  const built = computeSky(node.id, node.ground.traits, theta, simTime(), view.w, view.h, horizonY);
+  return { ...built, groundAlpha };
+}
+
+/**
+ * The chemistry of the enclosing galaxy, and where in it you are.
+ *
+ * Metallicity is the one trait that legitimately spans a hundred billion stars, because it is chemistry rather
+ * than culture, and it reaches all the way down to the colour of a single wall: a metal-poor rim world builds
+ * in pale chalk and a core world in dark iron-stained stone. The radius fraction comes from the system's own
+ * position in its galaxy, which is exactly the number the arm-density field placed it with.
+ */
+function oreFor(cam: Camera, tree: Tree): { hue: number; metallicity: number } {
+  let node: Node | null = cam.node;
+  let radiusFraction = 0.5;
+  for (let i = 0; i < 10 && node; i++) {
+    const parent: Node | null = tree.parentOf(node);
+    if (!parent) break;
+    if (parent.kind === 'galaxy') {
+      const ref = tree.refOf(node);
+      if (ref) radiusFraction = Math.min(1, Math.hypot(ref.ox, ref.oy));
+      const field = metallicityOf(parent.id);
+      return { hue: field.oreHue, metallicity: metallicityAt(field, radiusFraction) };
+    }
+    node = parent;
+  }
+  // Above galaxy level nothing is made of anything yet; a neutral chalk keeps the icons legible.
+  return { hue: 30, metallicity: 0.4 };
 }
 
 const traitCache = new Map<number, GalaxyTraits>();
