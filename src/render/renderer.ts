@@ -10,7 +10,8 @@ import { cosmicPaletteOf, css, voidBackgroundFor } from './palettes.ts';
 import { drawGalaxyInterior, drawGalaxyLive, drawGalaxySprite, drawGalaxyStandIn } from './draw/galaxy.ts';
 import { drawContainer, drawStar } from './draw/containers.ts';
 import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon } from './draw/planet.ts';
-import { planetTraits, type PlanetTraits } from '../universe/gen/planet.ts';
+import { planetTraitsFor, type PlanetTraits } from '../universe/gen/planet.ts';
+import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
 
 /** Objects smaller than this are not drawn at all; later their light folds into a baked wash tile. */
 const MIN_DRAW_PX = 0.45;
@@ -202,7 +203,7 @@ function paint(
       stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR });
     }
     if (hitR >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
-      drawLabel(ctx, node, sx, sy, hitR);
+      drawLabel(frame, node, sx, sy, hitR);
       stats.labels++;
     }
   }
@@ -296,13 +297,9 @@ function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number)
   }
 
   if (node.kind === 'planet') {
-    const parentId = frame.tree.parentOf(node)?.id ?? node.id;
-    const index = node.path[node.path.length - 1]?.cx ?? 0;
-    const count = Math.max(1, orbitCount(frame.tree.parentOf(node) ?? node));
-    const traits = planetTraitsCached(node.id, parentId, index, count);
+    const traits = planetTraitsFor(node, frame.tree);
     // Returns the radius actually drawn, which may be the schematic floor rather than the true size.
-    const drawn = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
-    frame.lastDrawnRadius = drawn;
+    frame.lastDrawnRadius = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
     return;
   }
 
@@ -424,18 +421,6 @@ function galaxyViewport(
   return null;
 }
 
-const planetCache = new Map<number, PlanetTraits>();
-
-function planetTraitsCached(id: number, systemId: number, index: number, count: number): PlanetTraits {
-  let t = planetCache.get(id);
-  if (!t) {
-    t = planetTraits(id, systemId, index, count);
-    if (planetCache.size > 512) planetCache.clear();
-    planetCache.set(id, t);
-  }
-  return t;
-}
-
 const traitCache = new Map<number, GalaxyTraits>();
 
 function galaxyTraitsCached(id: number): GalaxyTraits {
@@ -448,9 +433,39 @@ function galaxyTraitsCached(id: number): GalaxyTraits {
   return t;
 }
 
-function drawLabel(ctx: CanvasRenderingContext2D, node: Node, sx: number, sy: number, rPx: number): void {
+/**
+ * Two naming tiers. Cosmic objects carry the Almanac Office's catalogue names, because nobody lives in
+ * a galaxy to name one and a catalogue is supposed to be consistent. An inhabited planet and everything
+ * below it is named in that world's own language.
+ */
+export function displayName(node: Node, tree: Tree): string {
   const last = node.path[node.path.length - 1];
-  const text = catalogName(node.kind, node.id, last ? last.cx + last.cy : 0);
+  const fallback = () => catalogName(node.kind, node.id, last ? last.cx + last.cy : 0);
+  if (node.kind === 'field' || node.kind === 'cluster' || node.kind === 'galaxy' || node.kind === 'system') {
+    return fallback();
+  }
+  const found = planetCultureFor(node, tree);
+  if (!found || !found.culture.inhabited) {
+    // An uninhabited world is a rock with a catalogue number, and so are its regions.
+    return node.kind === 'planet' ? fallback() : `${fallback()}`;
+  }
+  switch (node.kind) {
+    case 'planet':
+      return found.culture.localName;
+    case 'region':
+      return regionName(found.culture, node.id);
+    case 'settlement':
+      return settlementName(found.culture, node.id);
+    case 'building':
+      return buildingName(found.culture, node.id).functional;
+    default:
+      return fallback();
+  }
+}
+
+function drawLabel(frame: Frame, node: Node, sx: number, sy: number, rPx: number): void {
+  const { ctx } = frame;
+  const text = displayName(node, frame.tree);
   ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif';
   ctx.textAlign = 'center';
   ctx.textBaseline = 'middle';

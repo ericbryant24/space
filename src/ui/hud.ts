@@ -1,6 +1,11 @@
 import { mantissaHeadroom, metresPerPixel, pxPerUnit, type Camera } from '../camera/camera.ts';
 import { catalogName } from '../cosmic/catalog.ts';
+import { describeLanguage } from '../culture/language.ts';
+import { planetLine, settlementLine } from '../culture/lore.ts';
+import { planetCultureFor } from '../universe/gen/culture.ts';
+import { displayName } from '../render/renderer.ts';
 import { KIND_ORDER, LEVELS, formatDistance } from '../universe/schema.ts';
+import type { Tree } from '../universe/tree.ts';
 import type { RenderStats } from '../render/renderer.ts';
 
 export interface Hud {
@@ -14,7 +19,7 @@ export interface Hud {
  * holds, and a regression in either is completely invisible in a screenshot. Keeping them on screen
  * has been the single most useful piece of infrastructure in the project.
  */
-export function createHud(root: HTMLElement, onCrumb: (depth: number) => void): Hud {
+export function createHud(root: HTMLElement, tree: Tree, onCrumb: (depth: number) => void): Hud {
   const trail = document.createElement('nav');
   trail.className = 'trail';
   root.appendChild(trail);
@@ -59,12 +64,13 @@ export function createHud(root: HTMLElement, onCrumb: (depth: number) => void): 
         trail.innerHTML = crumbs.join('<span class="sep">/</span>');
       }
 
-      const last = cam.node.path[depth - 1];
-      const name = catalogName(cam.node.kind, cam.node.id, last ? last.cx + last.cy : 0);
+      const name = displayName(cam.node, tree);
+      const card = placeCard(cam, tree);
 
       panel.innerHTML = `
         <div class="name">${escapeHtml(name)}</div>
-        <div class="sub">${LEVELS[cam.node.kind].label} &middot; depth ${depth}</div>
+        <div class="sub">${escapeHtml(card.sub)}</div>
+        ${card.line ? `<div class="lore">${escapeHtml(card.line)}</div>` : ''}
         <div class="rows">
           <div><span class="dim">R</span> <span class="${inWindow ? 'good' : 'bad'}">${r.toFixed(1)} px</span> <span class="dim">[64, 1024]</span></div>
           <div><span class="dim">mantissa</span> <span class="${headroom > 30 ? 'good' : 'bad'}">${headroom.toFixed(1)} bits</span></div>
@@ -86,6 +92,36 @@ export function createHud(root: HTMLElement, onCrumb: (depth: number) => void): 
         `<span class="len">${formatDistance(nice)}</span>`;
     },
   };
+}
+
+/**
+ * The place card. Every slot is filled from the thing's actual traits, so the prose is a readout rather
+ * than decoration -- which is the only reason it is worth having.
+ */
+function placeCard(cam: Camera, tree: Tree): { sub: string; line: string } {
+  const kind = cam.node.kind;
+  const label = LEVELS[kind].label;
+  const found = planetCultureFor(cam.node, tree);
+
+  if (kind === 'planet' && found) {
+    const parent = tree.parentOf(cam.node);
+    const starName = parent ? catalogName('system', parent.id, 0) : 'its star';
+    const designation = catalogName('planet', cam.node.id, cam.node.path[cam.node.path.length - 1]?.cx ?? 0);
+    const sub = found.culture.inhabited
+      ? `${starName} ${designation} · called ${found.culture.localName} by the people who live there`
+      : `${starName} ${designation} · ${found.traits.label}`;
+    return { sub, line: planetLine(found.traits, found.culture, starName, cam.node.id) };
+  }
+  if (kind === 'settlement' && found?.culture.inhabited) {
+    return {
+      sub: `${label} · ${found.culture.motif} motif`,
+      line: settlementLine(found.culture, found.traits, cam.node.id, displayName(cam.node, tree)),
+    };
+  }
+  if ((kind === 'region' || kind === 'building') && found?.culture.inhabited) {
+    return { sub: `${label} on ${found.culture.localName}`, line: describeLanguage(found.culture.language) };
+  }
+  return { sub: `${label} · depth ${cam.node.path.length}`, line: '' };
 }
 
 function escapeHtml(s: string): string {

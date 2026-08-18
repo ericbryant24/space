@@ -60,7 +60,7 @@ const seed = initial.seed ?? DEFAULT_SEED;
 const tree = new Tree(seed);
 const cam = createCamera(tree.root, ROOT_Z);
 const input = createInput(cam);
-const hud = createHud(overlay, (depth) => flyToDepth(depth));
+const hud = createHud(overlay, tree, (depth) => flyToDepth(depth));
 
 applyState(initial);
 

@@ -1,6 +1,7 @@
 import { habitableZone, starLightOf, type StarLight } from '../../cosmic/spectral.ts';
 import { f01, roll } from '../../core/rng.ts';
-import { orbitRadius } from '../node.ts';
+import { orbitCount, orbitRadius, type Node } from '../node.ts';
+import type { Tree } from '../tree.ts';
 
 /**
  * Planet traits. Physical only -- language, architecture and biosphere belong here too, but they are
@@ -194,4 +195,22 @@ const clamp01 = (v: number): number => Math.min(1, Math.max(0, v));
 
 export function isGiant(cls: PlanetClass): boolean {
   return cls === 'gasGiant' || cls === 'iceGiant';
+}
+
+// One cache, shared by rendering and by the culture layer. Two separate caches drifted apart: the
+// culture layer was passing a guessed sibling count, which changes the orbital radius and therefore the
+// climate, so a planet had one climate when drawn and another when named.
+const cache = new Map<number, PlanetTraits>();
+
+export function planetTraitsFor(planet: Node, tree: Tree): PlanetTraits {
+  let t = cache.get(planet.id);
+  if (!t) {
+    const parent = tree.parentOf(planet);
+    const index = planet.path[planet.path.length - 1]?.cx ?? 0;
+    const count = parent ? Math.max(1, orbitCount(parent)) : 1;
+    t = planetTraits(planet.id, parent?.id ?? planet.id, index, count);
+    if (cache.size > 512) cache.clear();
+    cache.set(planet.id, t);
+  }
+  return t;
 }
