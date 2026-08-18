@@ -73,6 +73,7 @@ export function upAngleFor(cam: Camera, weight: number): number {
   const theta = outwardAngle(cam);
   if (theta === null) {
     previous = 0;
+    applied = 0;
     return 0;
   }
   const raw = -Math.PI / 2 - theta;
@@ -80,7 +81,24 @@ export function upAngleFor(cam: Camera, weight: number): number {
   const turns = Math.round((previous - raw) / (Math.PI * 2));
   const unwrapped = raw + turns * Math.PI * 2;
   previous = unwrapped;
-  return unwrapped * Math.min(1, Math.max(0, weight));
+  applied = unwrapped * Math.min(1, Math.max(0, weight));
+  return applied;
+}
+
+/**
+ * The turn the last painted frame actually used.
+ *
+ * Hit testing needs it. The renderer's own hit list comes out in final screen space, because the rotation is
+ * applied to the screen mapping rather than to the canvas -- but anything that works the geometry out from the
+ * camera instead of reading it back off the paint, which is how a planet's rim slots are found, has to turn the
+ * pointer back first. Read rather than recomputed so the two cannot disagree: it is the same number, from the
+ * same frame, and picking against a rotation the screen is not actually under would be worse than not rotating
+ * at all. Zero until a frame has been painted, which is what makes this harmless in a test.
+ */
+let applied = 0;
+
+export function appliedUp(): number {
+  return applied;
 }
 
 /** Undo the scene rotation for a screen point, so a pointer can be compared with unrotated geometry. */
