@@ -5,7 +5,7 @@ import { ascend, updateFocus } from './camera/rebase.ts';
 import { setSimTime } from './core/clock.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, stepInput } from './input/pointer.ts';
-import { drawHover, hitTest, hoverLabel, render, type HitEntry } from './render/renderer.ts';
+import { drawHover, hitTest, hoverLabel, render, scatterHitAt, type HitEntry } from './render/renderer.ts';
 import { childNear, childrenNear } from './universe/node.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
@@ -139,7 +139,7 @@ const loop = startLoop((dt) => {
 
   // Reticle under the cursor, so it is visible that things can be travelled to at all.
   if (!flight && !input.dragging) {
-    const hovered = hitTest(lastHits, input.hoverX, input.hoverY);
+    const hovered = pick(input.hoverX, input.hoverY);
     if (hovered && hovered.path.length > cam.node.path.length) {
       const node = tree.resolve(hovered.path);
       if (node) drawHover(ctx, hovered, hoverLabel(node, tree), performance.now() / 1000);
@@ -158,10 +158,26 @@ const loop = startLoop((dt) => {
 attachInput(canvas, cam, input, () => view, () => loop.wake());
 
 input.onClick = (x, y) => {
-  const hit = hitTest(lastHits, x, y);
+  const hit = pick(x, y);
   if (!hit) return;
   travelTo(hit);
 };
+
+/**
+ * What is under a screen point.
+ *
+ * The frame's hit list covers everything drawn at true scale, and the analytic lookup covers a galaxy's
+ * few thousand catalogued stars, which are too numerous to record. The star wins when both match,
+ * because it is the deeper, more specific thing.
+ */
+function pick(x: number, y: number): HitEntry | null {
+  const hit = scatterHitAt(cam, view, x, y) ?? hitTest(lastHits, x, y);
+  // The focus node and its ancestors fill most of the screen, so they win almost every pick made in the
+  // empty space between their children. Travelling to where you already are is a two-second flight that
+  // lands exactly where it started, which reads as the click having gone wrong. Backspace rises instead.
+  if (hit && hit.path.length <= cam.node.path.length) return null;
+  return hit;
+}
 
 /**
  * How far, in doublings, a thing is from being enterable at its true size.
@@ -191,10 +207,10 @@ function travelTo(hit: HitEntry): boolean {
 
 input.onZoomIntent = (x, y) => {
   if (flight) return false;
-  const hit = hitTest(lastHits, x, y);
-  // Only take over for something deeper than where we already are, and only when hand-zooming to it
-  // would mean crossing a gap no one could cross by scrolling.
-  if (!hit || hit.path.length <= cam.node.path.length) return false;
+  const hit = pick(x, y);
+  // Only when hand-zooming to it would mean crossing a gap no one could cross by scrolling. (`pick`
+  // has already discarded the focus node and its ancestors.)
+  if (!hit) return false;
   if (doublingsAway(hit) <= FLY_THRESHOLD_DOUBLINGS) return false;
   return travelTo(hit);
 };
@@ -251,7 +267,7 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'Enter':
     case 'f': {
-      const hit = hitTest(lastHits, input.hoverX, input.hoverY);
+      const hit = pick(input.hoverX, input.hoverY);
       if (hit) travelTo(hit);
       break;
     }
@@ -359,6 +375,11 @@ Object.assign(window as unknown as Record<string, unknown>, {
         ? { depth: planned.depth, az: planned.az, bz: planned.bz, zOut: planned.zOut, dur: planned.duration }
         : null,
     };
+  },
+  /** What a click at this point would resolve to. Used by the navigation checks. */
+  __pick: (x: number, y: number) => {
+    const hit = pick(x, y);
+    return hit ? { kind: hit.kind, x: hit.xPx, y: hit.yPx, r: hit.rPx } : null;
   },
   __hits: () =>
     lastHits.map((h) => ({

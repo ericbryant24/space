@@ -67,7 +67,6 @@ export interface GalaxyShape {
 
   /** Star population. */
   readonly starCount: number;
-  readonly heroStars: number;
   readonly activeNucleus: boolean;
 }
 
@@ -101,8 +100,10 @@ function buildShape(id: number): GalaxyShape {
     ringRadius: 0.6 + r('ringR') * 0.25,
     ringKnots: 1 + Math.floor(r('knots') * 3),
 
-    starCount: Math.round(900 + r('starCount') * 3100),
-    heroStars: Math.round(30 + r('heroStars') * 20),
+    // Catalogued systems, not actual stars. These are drawn as individual clickable points at galaxy
+    // level, so the count is set by what reads clearly and picks cleanly rather than by astrophysics --
+    // 3400 packed a 512 px disc into mush and buried the arms underneath it.
+    starCount: Math.round(600 + r('starCount') * 1200),
     activeNucleus: r('agn') < 0.03,
   };
 }

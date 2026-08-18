@@ -1,5 +1,5 @@
 import { simTime } from '../core/clock.ts';
-import { f01, fSym, hash, hash2, hash3, hash4, roll } from '../core/rng.ts';
+import { f01, fSym, hash, hash2, hash3, hash4, mix, roll } from '../core/rng.ts';
 import { armDensity, galaxyShape } from './gen/galaxyShape.ts';
 import { LEVELS, ROOT_KIND, anchorLevel, type Kind } from './schema.ts';
 
@@ -53,6 +53,10 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   if (level.placement === 'orbits') {
     if (cell.cy !== 0) return null;
     return orbitalChild(node, cell.cx);
+  }
+  if (level.placement === 'scatter') {
+    if (cell.cy !== 0) return null;
+    return scatterChild(node, cell.cx);
   }
 
   const k = anchorLevel(node.kind);
@@ -212,6 +216,7 @@ export function childNear(node: Node, nx: number, ny: number, searchRings = 6): 
     }
     return best;
   }
+  if (level.placement === 'scatter') return nearestScatter(node, nx, ny);
 
   const here = anchorCellAt(node, nx, ny);
   const direct = childAt(node, here);
@@ -233,6 +238,13 @@ export function childrenNear(node: Node, nx: number, ny: number, limit = 24): Ch
   const level = LEVELS[node.kind];
   if (!level.child) return [];
   if (level.placement === 'orbits') return orbitalChildren(node).slice(0, limit);
+  if (level.placement === 'scatter') {
+    // Nearest first, so Tab tours the stars around you rather than the galaxy's index order. Sorting a
+    // COPY: the list itself is cached and shared with the renderer.
+    const all = scatterChildren(node).slice();
+    all.sort((a, b) => (nx - a.ox) ** 2 + (ny - a.oy) ** 2 - ((nx - b.ox) ** 2 + (ny - b.oy) ** 2));
+    return all.slice(0, limit);
+  }
 
   const here = anchorCellAt(node, nx, ny);
   const out: ChildRef[] = [];
@@ -246,4 +258,104 @@ export function childrenNear(node: Node, nx: number, ny: number, limit = 24): Ch
     }
   }
   return out;
+}
+
+/**
+ * How many systems a galaxy has catalogued. Bounded and a few thousand: the number of stars you could
+ * plausibly pick out and travel to, not the hundred billion that are actually there.
+ */
+export function scatterCount(node: Node): number {
+  if (LEVELS[node.kind].placement !== 'scatter') return 0;
+  return galaxyShape(node.id).starCount;
+}
+
+/**
+ * The i-th catalogued system of a galaxy, at a fixed position drawn from the galaxy's own density field.
+ *
+ * Rejection sampling against `armDensity` is what makes the stars sit in the arms rather than in a
+ * uniform smear, and it is the same field the arms and the diffuse glow are drawn from -- so the stars
+ * you can travel to are exactly where the galaxy looks bright.
+ */
+export function scatterChild(node: Node, index: number): ChildRef | null {
+  const level = LEVELS[node.kind];
+  const kind = level.child;
+  if (!kind || level.placement !== 'scatter') return null;
+  if (!Number.isInteger(index) || index < 0 || index >= scatterCount(node)) return null;
+
+  const shape = galaxyShape(node.id);
+  const id = hash3(node.id, 0x57a2, index);
+
+  // Rejection-sample a position inside the unit disc, weighted by arm density. Bounded attempts, then
+  // fall back to the core, which is dense in every morphology -- so a ref is always produced.
+  let ox: number | null = null;
+  let oy = 0;
+  for (let attempt = 0; attempt < 10 && ox === null; attempt++) {
+    const h = hash2(id, attempt);
+    const x = fSym(h) * 0.97;
+    const y = fSym(mix(h, 1)) * 0.97;
+    if (x * x + y * y > 0.94) continue;
+    if (f01(mix(h, 2)) <= armDensity(shape, x, y)) {
+      ox = x;
+      oy = y;
+    }
+  }
+  if (ox === null) {
+    // Somewhere in the core, which is dense in every morphology. The alternative -- returning null --
+    // would leave holes in an ordered list whose indices are permalinks.
+    const h = hash2(id, 0x0fa11);
+    const a = f01(h) * Math.PI * 2;
+    const rad = shape.coreRadius * f01(mix(h, 1));
+    ox = Math.cos(a) * rad;
+    oy = Math.sin(a) * rad;
+  }
+
+  const logSpan = LEVELS[kind].logSpan + fSym(hash2(id, 0x02)) * level.sizeJitter;
+  return {
+    cell: { cx: index, cy: 0 },
+    id,
+    kind,
+    logSpan,
+    ox,
+    oy,
+    rel: 2 ** (logSpan - node.logSpan),
+  };
+}
+
+/**
+ * Every catalogued system of a galaxy, cached.
+ *
+ * Positions are fixed and time-independent, so this is computed once per galaxy rather than per frame.
+ * Rebuilding it each frame cost 13 ms: a few thousand children, each rejection-sampling against
+ * `armDensity` up to twenty times.
+ */
+const scatterCache = new Map<number, ChildRef[]>();
+
+export function scatterChildren(node: Node): ChildRef[] {
+  const hit = scatterCache.get(node.id);
+  if (hit) return hit;
+
+  const out: ChildRef[] = [];
+  const count = scatterCount(node);
+  for (let i = 0; i < count; i++) {
+    const ref = scatterChild(node, i);
+    if (ref) out.push(ref);
+  }
+  // Only a handful of galaxies are ever in play at once, and each list is a few thousand small objects.
+  if (scatterCache.size > 6) scatterCache.clear();
+  scatterCache.set(node.id, out);
+  return out;
+}
+
+/** The scattered child nearest a point, in node units. Linear over a few thousand: still trivial. */
+export function nearestScatter(node: Node, nx: number, ny: number): ChildRef | null {
+  let best: ChildRef | null = null;
+  let bestDist = Infinity;
+  for (const ref of scatterChildren(node)) {
+    const d = (nx - ref.ox) ** 2 + (ny - ref.oy) ** 2;
+    if (d < bestDist) {
+      bestDist = d;
+      best = ref;
+    }
+  }
+  return best;
 }

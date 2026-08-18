@@ -163,7 +163,43 @@ const main = async () => {
   console.log(`click     ${before.path || 'root'} -> ${after.path || 'root'}`);
   if (after.path !== target.path) fail(`click landed at "${after.path}", expected "${target.path}"`);
 
-  // 8. A garbage URL must not break the page.
+  // 8. One scroll notch toward a star at galaxy level must land inside that star's system.
+  //
+  // This is the check for the whole point of scattered placement: a galaxy's visible stars ARE its
+  // catalogued systems, so aiming at one and scrolling has to go there. It cannot be a unit test --
+  // it needs a real wheel event, the analytic star pick, the flight planner, and thirty rebases.
+  await page.goto(BASE, { waitUntil: 'load' });
+  await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 15000 });
+  await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
+  for (let i = 0; i < 400; i++) {
+    if ((await state(page)).kind === 'galaxy') break;
+    await page.evaluate(() => (window as unknown as { __diveStep(dz?: number): void }).__diveStep(0.5));
+  }
+  await settle(page, 12);
+  const atGalaxy = await state(page);
+  if (atGalaxy.kind !== 'galaxy') fail(`could not reach galaxy focus; stopped at ${atGalaxy.kind}`);
+  const star = await page.evaluate(() => {
+    const w = window as unknown as { __pick(x: number, y: number): { kind: string; r: number } | null };
+    // Scan on a coarse grid: a few hundred stars are on screen, so this finds one in a few dozen tries.
+    for (let y = 80; y < 720; y += 11) {
+      for (let x = 220; x < 1060; x += 11) {
+        const h = w.__pick(x, y);
+        if (h && h.kind === 'system') return { x, y, r: h.r };
+      }
+    }
+    return null;
+  });
+  if (!star) fail('no catalogued star was pickable at galaxy focus');
+  await page.mouse.move(star.x, star.y);
+  await page.mouse.wheel(0, -120);
+  await rest(page);
+  const arrived = await state(page);
+  console.log(`star      r=${star.r.toFixed(1)}px  one notch -> ${arrived.kind} depth ${arrived.path.split('/').filter(Boolean).length}`);
+  if (arrived.kind !== 'system') {
+    fail(`one scroll notch at a star landed on ${arrived.kind}, expected system`);
+  }
+
+  // 9. A garbage URL must not break the page.
   await page.goto(`${BASE}#s=!!!&p=zz.-1-oops&k=-9&z=NaN&o=x,y`, { waitUntil: 'load' });
   await page.waitForFunction('window.__cam !== undefined', null, { timeout: 15000 });
   await settle(page, 6);

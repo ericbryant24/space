@@ -1,4 +1,11 @@
-import { anchorCellAt, childAt, makeChild, orbitalChildren, type ChildRef } from '../universe/node.ts';
+import {
+  anchorCellAt,
+  childAt,
+  makeChild,
+  nearestScatter,
+  orbitalChildren,
+  type ChildRef,
+} from '../universe/node.ts';
 import type { Tree } from '../universe/tree.ts';
 import { LEVELS } from '../universe/schema.ts';
 import {
@@ -100,6 +107,15 @@ export function pickEnterableChild(cam: Camera, rEnter: number): ChildRef | null
       if (dx * dx + dy * dy <= ref.rel * ref.rel) return ref;
     }
     return null;
+  }
+
+  if (level.placement === 'scatter') {
+    const ref = nearestScatter(cam.node, nx, ny);
+    if (!ref) return null;
+    if (ref.rel * scale < rEnter) return null;
+    const dx = nx - ref.ox;
+    const dy = ny - ref.oy;
+    return dx * dx + dy * dy <= ref.rel * ref.rel ? ref : null;
   }
 
   const ref = childAt(cam.node, anchorCellAt(cam.node, nx, ny));

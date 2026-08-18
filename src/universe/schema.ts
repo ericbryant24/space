@@ -21,8 +21,14 @@ export type Kind =
  * `orbits` places a short, ordered list of children on circular orbits. A system has under ten
  * planets, so it needs neither the grid nor the bounded-fanout guarantee -- and planets belong on
  * orbits, which a grid cannot express.
+ *
+ * `scatter` places a bounded, ordered list at fixed positions drawn from the parent's own density
+ * field. It exists because the grid, applied to a galaxy, put its systems on 10^16 cells each 4e-7 px
+ * across at galaxy zoom -- so not one star you could see was a real place, and "zoom in on that star"
+ * had no answer. A galaxy now carries a few thousand CATALOGUED systems: the stars you see are the
+ * stars you can go to. The rest of its hundred billion remain unresolved glow, which is honest.
  */
-export type Placement = 'cells' | 'orbits';
+export type Placement = 'cells' | 'orbits' | 'scatter';
 
 export interface Level {
   readonly kind: Kind;
@@ -43,7 +49,7 @@ export const ROOT_KIND: Kind = 'field';
 export const LEVELS: Readonly<Record<Kind, Level>> = {
   field: { kind: 'field', placement: 'cells', logSpan: 80, child: 'cluster', density: 0.62, spacing: 4, sizeJitter: 0.3, label: 'Field' },
   cluster: { kind: 'cluster', placement: 'cells', logSpan: 75, child: 'galaxy', density: 0.55, spacing: 4, sizeJitter: 0.45, label: 'Cluster' },
-  galaxy: { kind: 'galaxy', placement: 'cells', logSpan: 69, child: 'system', density: 0.5, spacing: 4, sizeJitter: 0.35, label: 'Galaxy' },
+  galaxy: { kind: 'galaxy', placement: 'scatter', logSpan: 69, child: 'system', density: 0.5, spacing: 4, sizeJitter: 0.35, label: 'Galaxy' },
   system: { kind: 'system', placement: 'orbits', logSpan: 40, child: 'planet', density: 0.5, spacing: 4, sizeJitter: 0.5, label: 'System' },
   planet: { kind: 'planet', placement: 'cells', logSpan: 23, child: 'region', density: 0.7, spacing: 3, sizeJitter: 0.2, label: 'Planet' },
   region: { kind: 'region', placement: 'cells', logSpan: 15, child: 'settlement', density: 0.45, spacing: 4, sizeJitter: 0.3, label: 'Region' },

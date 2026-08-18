@@ -38,14 +38,22 @@ export const SPECTRAL: readonly SpectralClass[] = [
 
 const TOTAL_WEIGHT = SPECTRAL.reduce((a, c) => a + c.weight, 0);
 
-export function spectralOf(nodeId: number): SpectralClass {
+/**
+ * Index into SPECTRAL rather than the class itself. The renderer batches a galaxy's stars by class so
+ * it can emit one path per colour instead of one per star, and an index is what a bucket array wants.
+ */
+export function spectralIndexOf(nodeId: number): number {
   const r = f01(roll(nodeId, 'spectralClass')) * TOTAL_WEIGHT;
   let acc = 0;
-  for (const c of SPECTRAL) {
-    acc += c.weight;
-    if (r <= acc) return c;
+  for (let i = 0; i < SPECTRAL.length; i++) {
+    acc += SPECTRAL[i]!.weight;
+    if (r <= acc) return i;
   }
-  return SPECTRAL[0]!;
+  return 0;
+}
+
+export function spectralOf(nodeId: number): SpectralClass {
+  return SPECTRAL[spectralIndexOf(nodeId)]!;
 }
 
 export interface StarLight {

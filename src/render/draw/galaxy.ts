@@ -1,7 +1,7 @@
 import { f01, hash3, hash4, mix, sm32 } from '../../core/rng.ts';
 import { armDensity, type GalaxyTraits } from '../../universe/gen/galaxy.ts';
 import { css, shade, type Hsl } from '../color.ts';
-import { outlineWidth } from '../bands.ts';
+import { outlineWidth, smoothstep } from '../bands.ts';
 import { getScratch, getSpriteBudgeted, sizeBucket, type Sprite } from '../sprites.ts';
 
 /**
@@ -225,37 +225,6 @@ function paintStars(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: nu
   return drawn;
 }
 
-/** Four-point cartoon sparkles. Only these carry labels at galaxy zoom. */
-function paintHeroStars(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: GalaxyTraits): void {
-  const p = t.palette;
-  let h = sm32(0x0beac04);
-  for (let i = 0; i < t.heroStars; i++) {
-    h = sm32(h);
-    const x = f01(h) * 2 - 1;
-    h = sm32(h);
-    const y = f01(h) * 2 - 1;
-    h = sm32(h);
-    if (f01(h) > armDensity(t, x, y) * 0.8) continue;
-    h = sm32(h);
-    const len = r * (0.012 + f01(h) * 0.016);
-    const sx = cx + x * r;
-    const sy = cy + y * r;
-    ctx.fillStyle = css(p.PAPER, 0.95);
-    ctx.beginPath();
-    ctx.moveTo(sx - len, sy);
-    ctx.lineTo(sx, sy - len * 0.22);
-    ctx.lineTo(sx + len, sy);
-    ctx.lineTo(sx, sy + len * 0.22);
-    ctx.closePath();
-    ctx.moveTo(sx, sy - len);
-    ctx.lineTo(sx + len * 0.22, sy);
-    ctx.lineTo(sx, sy + len);
-    ctx.lineTo(sx - len * 0.22, sy);
-    ctx.closePath();
-    ctx.fill();
-  }
-}
-
 /** Everything except the stipple. Shared by the live path and the baked sprite. */
 function paintStructure(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: GalaxyTraits): void {
   switch (t.morphology) {
@@ -306,10 +275,6 @@ export function galaxySprite(
   });
 }
 
-export interface GalaxyDrawOptions {
-  readonly starBudget: number;
-}
-
 /** Draw one live galaxy at full detail. Used only when it is large on screen. */
 export function drawGalaxyLive(
   ctx: CanvasRenderingContext2D,
@@ -317,11 +282,17 @@ export function drawGalaxyLive(
   cy: number,
   r: number,
   t: GalaxyTraits,
-  opts: GalaxyDrawOptions,
-): number {
+): void {
+  /**
+   * STRUCTURE ONLY -- no stipple, and no hero stars.
+   *
+   * The baked sprite still stipples (see `drawGalaxySprite`), because at cluster zoom a galaxy is a
+   * picture and its grain is part of the picture. Live, it must not: at this size the galaxy's own
+   * catalogued systems are drawn as real, clickable stars, and painting a second population of
+   * decorative dots over them is what produced "stars just seem to shoot past at random". Every star you
+   * can see at galaxy zoom is now a place you can go to.
+   */
   paintStructure(ctx, cx, cy, r, t);
-  const drawn = paintStars(ctx, cx, cy, r, t, opts.starBudget);
-  paintHeroStars(ctx, cx, cy, r, t);
   if (t.activeNucleus) {
     // Two jet cones, flat fills, no glow.
     ctx.save();
@@ -338,7 +309,6 @@ export function drawGalaxyLive(
     }
     ctx.restore();
   }
-  return drawn;
 }
 
 /**
@@ -446,27 +416,110 @@ const WASH_H = 40;
 const CLOUD_FEATURE_PX = 300;
 const STAR_PITCH_PX = 38;
 
+/**
+ * Must stay equal to the `arms` band's fade-out range in bands.ts: arm structure leaving and unresolved
+ * haze arriving are two halves of one crossfade, and if the numbers drift apart there is a stretch of
+ * zoom where neither is drawn.
+ */
+const ARMS_FADE_PX: readonly [number, number] = [420, 1700];
+
+/**
+ * The depth at which the sky stops resolving finer -- and the one place in this project that needed a
+ * limit like this.
+ *
+ * Everything else navigates by a focus frame normalised to radius 1, precisely so no coordinate ever has
+ * to carry 76 bits of range. The starfield broke that rule: its lattice is indexed in absolute GALAXY
+ * units, and by planet depth a cell index came out around 2^57. Float64 holds integers exactly only to
+ * 2^53; past that, adjacent doubles are 4 or more apart, so `i++` leaves `i` unchanged and
+ * `for (let i = i0; i <= i1; i++)` spins forever. Zooming in on a planet anywhere but the exact galactic
+ * centre locked the tab up hard.
+ *
+ * The fix is also the physically honest answer: stars are effectively at infinity. Moving a few thousand
+ * kilometres inside a solar system does not shift the constellations, so below this depth the lattice
+ * stops subdividing and the field stops parallaxing -- the sky is widened by the same factor the zoom
+ * narrowed it, which holds it fixed on screen. Level 44 leaves nine bits of headroom at the deepest
+ * index the two drawn levels can reach.
+ */
+export const MAX_LATTICE_LEVEL = 44;
+
+/**
+ * The sky's bounds in galaxy units, widened if we are past the freeze depth.
+ *
+ * Takes a CENTRE and a HALF-EXTENT rather than two edges, and that is not a style preference: at region
+ * depth the half-extent is about 2^-54 galaxy units, so `nx - halfW` and `nx + halfW` round to the same
+ * double and their difference is exactly zero. Deriving the scale from that zero gave a lattice level of
+ * 1001 and cell indices around 2e300, which is how the freeze got bypassed and the hang came back at a
+ * level further down. The scale has to come from `halfW` itself, which never underflows.
+ */
+export function skyBounds(
+  nx: number,
+  ny: number,
+  halfW: number,
+  halfH: number,
+  viewW: number,
+): { x0: number; x1: number; y0: number; y1: number; pxPerUnit: number; rawPxPerUnit: number } {
+  const rawPxPerUnit = viewW / (2 * Math.max(Number.MIN_VALUE, halfW));
+  const freeze = latticeFreeze(rawPxPerUnit);
+  const hw = halfW * freeze;
+  const hh = halfH * freeze;
+  return {
+    x0: nx - hw,
+    x1: nx + hw,
+    y0: ny - hh,
+    y1: ny + hh,
+    pxPerUnit: rawPxPerUnit / freeze,
+    rawPxPerUnit,
+  };
+}
+
+/**
+ * How much to widen the sky so its lattice never subdivides past MAX_LATTICE_LEVEL. 1 means "not frozen
+ * yet". Exported so a test can assert the resulting cell indices stay exact integers.
+ */
+export function latticeFreeze(rawPxPerUnit: number): number {
+  return Math.max(1, rawPxPerUnit / (STAR_PITCH_PX * 2 ** MAX_LATTICE_LEVEL));
+}
+
+/** The lattice level the sky settles on, given the galaxy's true radius in pixels. */
+export function latticeLevel(rawPxPerUnit: number): number {
+  return Math.floor(Math.log2(rawPxPerUnit / latticeFreeze(rawPxPerUnit) / STAR_PITCH_PX));
+}
+
 export function drawGalaxyInterior(
   ctx: CanvasRenderingContext2D,
   t: GalaxyTraits,
   /**
-   * Viewport bounds in GALAXY units. Passed directly rather than derived from a centre and radius in
-   * pixels, because by planet depth the galaxy's radius is about 2^60 px and that subtraction would
-   * throw away every bit that matters.
+   * The viewport in GALAXY units, as a centre and a half-extent. Never as two edges: see `skyBounds`
+   * for what goes wrong when the two edges are the same double.
    */
-  x0: number,
-  x1: number,
-  y0: number,
-  y1: number,
+  nx: number,
+  ny: number,
+  halfW: number,
+  halfH: number,
   viewW: number,
   viewH: number,
 ): void {
+  const { x0, x1, y0, y1, pxPerUnit, rawPxPerUnit } = skyBounds(nx, ny, halfW, halfH, viewW);
+
   // Nothing to draw if the viewport has left the galaxy entirely.
   const nearestX = Math.max(x0, Math.min(0, x1));
   const nearestY = Math.max(y0, Math.min(0, y1));
   if (Math.hypot(nearestX, nearestY) > 1.05) return;
 
-  const pxPerUnit = viewW / Math.max(1e-300, x1 - x0);
+  /**
+   * Unresolved points belong only where the galaxy is far larger than the screen -- deep between the
+   * stars, where no individual star is a plausible destination and the sky is genuinely a haze.
+   *
+   * At galaxy zoom the galaxy's own catalogued systems are drawn as real stars, and adding a second,
+   * unreachable population on top of them is what made pointing at a star do nothing: most of the stars
+   * you could see went nowhere. So the haze fades in over exactly the range the arm ribbons fade out, by
+   * which point the catalogued stars have grown to their capped symbol size and carry haloes and
+   * sparkles. A 12 px star with a halo beside a 1 px speck is not a target anyone confuses.
+   *
+   * `rawPxPerUnit` IS the galaxy's radius in pixels, because a galaxy is one unit of its own space.
+   */
+  const hazeAlpha = smoothstep(ARMS_FADE_PX[0], ARMS_FADE_PX[1], rawPxPerUnit);
+
   const [cloudLevel, wCoarse, wFine] = scaleLevels(Math.log2(pxPerUnit / CLOUD_FEATURE_PX));
 
   const { surface, ctx: wctx } = getScratch(WASH_W);
@@ -502,7 +555,9 @@ export function drawGalaxyInterior(
   ctx.globalCompositeOperation = 'source-over';
   ctx.imageSmoothingEnabled = smoothing;
 
-  drawStarfield(ctx, t, x0, x1, y0, y1, viewW, viewH, pxPerUnit, cloudLevel);
+  if (hazeAlpha > 0.01) {
+    drawStarfield(ctx, t, x0, x1, y0, y1, viewW, viewH, pxPerUnit, cloudLevel, hazeAlpha);
+  }
 }
 
 /**
@@ -543,6 +598,8 @@ function drawStarfield(
   viewH: number,
   pxPerUnit: number,
   cloudLevel: number,
+  /** Fades the whole unresolved population in as the resolved one thins out. */
+  hazeAlpha: number,
 ): void {
   const p = t.palette;
   // Blending two levels splits each star's light between them, so the tones sit brighter than they
@@ -557,7 +614,7 @@ function drawStarfield(
   ] as const) {
     if (weight <= 0.004) continue;
     emitLevel(t, x0, x1, y0, y1, viewW, viewH, n, cloudLevel);
-    ctx.globalAlpha = weight;
+    ctx.globalAlpha = weight * hazeAlpha;
     for (let tone = 0; tone < TONE_COUNT; tone++) {
       const count = pointN[tone]!;
       if (count === 0) continue;

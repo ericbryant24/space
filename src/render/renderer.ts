@@ -1,15 +1,32 @@
 import { frameToNode, nodeToFrame, pxPerUnit, type Camera, type View } from '../camera/camera.ts';
 import { catalogName } from '../cosmic/catalog.ts';
-import { childAt, makeChild, orbitCount, orbitRadius, orbitalChildren, type Cell, type Node } from '../universe/node.ts';
+import {
+  childAt,
+  makeChild,
+  nearestScatter,
+  orbitCount,
+  orbitRadius,
+  orbitalChildren,
+  scatterChildren,
+  type Cell,
+  type Node,
+} from '../universe/node.ts';
 import { galaxyTraits, type GalaxyTraits } from '../universe/gen/galaxy.ts';
 import { LEVELS, anchorLevel, type Kind } from '../universe/schema.ts';
 import type { Tree } from '../universe/tree.ts';
-import { activeReps } from './bands.ts';
+import { activeReps, smoothstep } from './bands.ts';
 import { beginSpriteFrame, spritesPending } from './sprites.ts';
 import { cosmicPaletteOf, css, voidBackgroundFor } from './palettes.ts';
 import { drawGalaxyInterior, drawGalaxyLive, drawGalaxySprite, drawGalaxyStandIn } from './draw/galaxy.ts';
-import { drawContainer, drawStar } from './draw/containers.ts';
-import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon } from './draw/planet.ts';
+import {
+  beginStarBatch,
+  drawContainer,
+  drawStar,
+  flushStarBatch,
+  queueSystemStar,
+  systemStarRadius,
+} from './draw/containers.ts';
+import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
 import { planetTraitsFor, type PlanetTraits } from '../universe/gen/planet.ts';
 import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
 
@@ -25,6 +42,18 @@ const MIN_CHILD_PX = 1.1;
 const ANCESTOR_LIMIT_DIAGONALS = 64;
 /** Past this the node's own silhouette is off-screen anyway; iterate its children but skip its disc. */
 const MAX_SELF_DRAW_DIAGONALS = 2.5;
+/**
+ * A planet keeps drawing its own surface long past the general limit, because its regions do not become
+ * areas until it is several screens across, and dropping the disc at 2.5 diagonals left a stretch of
+ * bare starfield in between.
+ *
+ * But not without limit. The illustration is built from shapes measured in planet radii -- a terminator
+ * rect at 1.2r, ring ellipses out to 1.9r, a rim-light arc stroked at 0.045r -- and at forty thousand
+ * pixels of radius those cost enough to take the tab down with them; zooming into certain planets
+ * crashed the renderer outright. Past this limit the disc is one flat colour over the whole viewport
+ * anyway, which is exactly what `drawGround` paints instead.
+ */
+const PLANET_MAX_DIAGONALS = 6;
 const MAX_DEPTH = 5;
 const DRAW_BUDGET = 12000;
 const CELL_BUDGET = 24000;
@@ -40,6 +69,18 @@ const HIT_MIN_PX = 2.5;
  * so the deepest thing under the cursor still wins.
  */
 const HIT_GRAB_PX = 15;
+/** Parent size at which scattered children start to resolve, and at which they reach full strength. */
+const SCATTER_MIN_PARENT_PX = 110;
+const SCATTER_FULL_PARENT_PX = 320;
+/**
+ * Parent size below which orbital children are not drawn at all.
+ *
+ * Schematic children are exempt from the true-size gate, which meant every one of the ~80 stars visible
+ * at galaxy level also drew its planets as four-pixel icons on top of itself: a few hundred spurious
+ * dots, the draw budget pinned at its ceiling, and hit-testing returning a planet when you pointed at a
+ * star. A planet is only meaningful once its system is a frame you are looking into.
+ */
+const ORBIT_MIN_PARENT_PX = 70;
 
 /**
  * Minimum on-screen size for a child of a given kind to be worth drawing at all.
@@ -99,6 +140,10 @@ interface Frame {
   detailBias: number;
   /** Radius the last painter actually drew, which may exceed the true size for schematic bodies. */
   lastDrawnRadius: number;
+  /** Alpha for schematic children, used to fade resolved stars in as their galaxy grows. */
+  childAlpha: number;
+  /** On-screen radius of the node whose scattered children are being drawn. Sizes their symbols. */
+  scatterParentPx: number;
   stats: RenderStats;
 }
 
@@ -121,7 +166,7 @@ export function render(
   };
   beginSpriteFrame();
   const diagonal = Math.hypot(view.w, view.h);
-  const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, lastDrawnRadius: 0, stats };
+  const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, lastDrawnRadius: 0, childAlpha: 1, scatterParentPx: 0, stats };
 
   ctx.fillStyle = css(voidBackgroundFor(cam.node, tree));
   ctx.fillRect(0, 0, view.w, view.h);
@@ -156,9 +201,13 @@ export function render(
   // the screen and its systems are still sub-pixel rendered as a blank screen.
   const sky = galaxyViewport(cam, tree, view);
   if (sky) {
-    drawGalaxyInterior(ctx, galaxyTraitsCached(sky.id), sky.x0, sky.x1, sky.y0, sky.y1, view.w, view.h);
+    drawGalaxyInterior(ctx, galaxyTraitsCached(sky.id), sky.nx, sky.ny, sky.halfW, sky.halfH, view.w, view.h);
     stats.draws++;
   }
+  // Standing on a world, the sky is not the galaxy: it is daylight. Painted over the starfield rather
+  // than instead of it, so the handover is a crossfade and the stars are still there at the moment the
+  // atmosphere thickens.
+  if (drawGround(frame)) stats.draws++;
 
   paint(frame, node, centreX, centreY, scale, 0);
   stats.spritesPending = spritesPending();
@@ -192,18 +241,23 @@ function paint(
   const sy = view.h / 2 + (cyF - cam.fy) * r;
   if (sx + rPx < 0 || sy + rPx < 0 || sx - rPx > view.w || sy - rPx > view.h) return;
 
-  // A planet keeps drawing its surface however large it gets, because its regions do not appear until
-  // they are big enough to be areas. Dropping the disc at the usual size limit left a stretch of bare
-  // starfield between "planet fills the screen" and "regions become the map".
-  const selfVisible = node.kind === 'planet' || rPx <= MAX_SELF_DRAW_DIAGONALS * frame.diagonal;
+  // A planet holds on to its own surface far longer than anything else, because its regions do not appear
+  // until they are big enough to be areas -- see PLANET_MAX_DIAGONALS for both halves of that trade.
+  const selfLimit = node.kind === 'planet' ? PLANET_MAX_DIAGONALS : MAX_SELF_DRAW_DIAGONALS;
+  const selfVisible = rPx <= selfLimit * frame.diagonal;
   if (selfVisible) {
     frame.lastDrawnRadius = rPx;
-    drawDisc(frame, node, sx, sy, rPx);
+    drawDisc(frame, node, sx, sy, rPx, trueRPx, schematic);
     stats.draws++;
 
     // Use the radius actually drawn, so a schematic planet is as clickable as it looks.
     const hitR = frame.lastDrawnRadius;
-    if (hitR >= HIT_MIN_PX && stats.hits.length < 600) {
+    // Scattered stars are deliberately absent from this list. There can be several thousand on screen,
+    // so recording them would either blow the cap -- leaving most of the visible stars unclickable -- or
+    // allocate thousands of objects every frame. `scatterHit` finds them analytically instead, which is
+    // both exact and allocation-free.
+    const recordable = !(node.kind === 'system' && schematic);
+    if (recordable && hitR >= HIT_MIN_PX && stats.hits.length < 600) {
       stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR, trueRPx });
     }
     if (hitR >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
@@ -216,18 +270,49 @@ function paint(
   if (!level.child || depth >= MAX_DEPTH) return;
 
 
-  // Nominal child size decides whether iterating the anchor grid is worth anything at all. This is
-  // what keeps traversal structurally bounded: at wide zooms we never touch the grid.
-  const nominalRel = 2 ** (LEVELS[level.child].logSpan - node.logSpan);
-  const childFloor = MIN_CHILD_PX_BY_KIND[level.child] ?? MIN_CHILD_PX;
-  // Orbital bodies are drawn at a schematic floor size, so the true-size gate would hide the very
-  // thing a system view exists to show.
-  if (level.placement !== 'orbits' && nominalRel * scale * r < childFloor) return;
+  // Nominal child size decides whether iterating the anchor GRID is worth anything at all. This is what
+  // keeps traversal structurally bounded: at wide zooms we never touch the grid.
+  //
+  // It applies to cell placement only. Orbital and scattered children are drawn at a schematic floor
+  // size, so a true-size gate hides exactly what those views exist to show -- a planet is 2^-17 of its
+  // system and a star 2^-29 of its galaxy, so both fail it by a wide margin at every useful zoom.
+  if (level.placement === 'cells') {
+    const nominalRel = 2 ** (LEVELS[level.child].logSpan - node.logSpan);
+    const childFloor = MIN_CHILD_PX_BY_KIND[level.child] ?? MIN_CHILD_PX;
+    if (nominalRel * scale * r < childFloor) return;
+  }
 
   if (level.placement === 'orbits') {
+    if (rPx < ORBIT_MIN_PARENT_PX) return;
     for (const ref of orbitalChildren(node)) {
       paint(frame, makeChild(node, ref), cxF + ref.ox * scale, cyF + ref.oy * scale, ref.rel * scale, depth + 1, true);
     }
+    return;
+  }
+
+  if (level.placement === 'scatter') {
+    // Only once the parent is big enough for its stars to be worth picking out. Below that the baked
+    // galaxy sprite carries the look, and iterating a few thousand systems for each of a hundred
+    // distant galaxies would be pure waste.
+    if (rPx < SCATTER_MIN_PARENT_PX) return;
+    // Fade in over the same range the galaxy's own arms do, so resolved stars replace the sprite's
+    // unresolved ones instead of both being drawn at once.
+    const alpha = smoothstep(SCATTER_MIN_PARENT_PX, SCATTER_FULL_PARENT_PX, rPx);
+    frame.childAlpha = alpha;
+    frame.scatterParentPx = rPx;
+    // Each star only queues itself here; the whole population is emitted as one path per spectral class
+    // once the loop finishes. Labels and hit records still happen per star inside `paint`.
+    beginStarBatch();
+    for (const ref of scatterChildren(node)) {
+      paint(frame, makeChild(node, ref), cxF + ref.ox * scale, cyF + ref.oy * scale, ref.rel * scale, depth + 1, true);
+      if (stats.draws >= DRAW_BUDGET) {
+        stats.budgetHit = true;
+        break;
+      }
+    }
+    stats.draws += flushStarBatch(ctx, alpha);
+    frame.childAlpha = 1;
+    frame.scatterParentPx = 0;
     return;
   }
 
@@ -292,7 +377,15 @@ const CONTAINER: Partial<Record<Kind, number>> = {
   settlement: 1,
 };
 
-function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number): void {
+function drawDisc(
+  frame: Frame,
+  node: Node,
+  sx: number,
+  sy: number,
+  rPx: number,
+  trueRPx: number,
+  schematic: boolean,
+): void {
   const { ctx } = frame;
 
   if (node.kind === 'galaxy') {
@@ -304,6 +397,13 @@ function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number)
     const traits = planetTraitsFor(node, frame.tree);
     // Returns the radius actually drawn, which may be the schematic floor rather than the true size.
     frame.lastDrawnRadius = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
+    return;
+  }
+
+  if (node.kind === 'system' && schematic && frame.scatterParentPx > 0) {
+    // The batch is flushed by the caller. The star still counts against the frame's draw budget, which
+    // is what bounds how many of a galaxy's few thousand systems get considered at all.
+    frame.lastDrawnRadius = queueSystemStar(sx, sy, trueRPx, frame.scatterParentPx, node.id);
     return;
   }
 
@@ -383,26 +483,29 @@ function drawGalaxy(frame: Frame, node: Node, sx: number, sy: number, rPx: numbe
           drawGalaxyStandIn(ctx, sx, sy, rPx, traits);
         }
         break;
-      case 'arms': {
-        const budget = Math.max(0, Math.min(2600, DRAW_BUDGET - stats.draws));
-        stats.draws += drawGalaxyLive(ctx, sx, sy, rPx, traits, { starBudget: budget });
+      case 'arms':
+        drawGalaxyLive(ctx, sx, sy, rPx, traits);
+        stats.draws++;
         break;
-      }
+      case 'deep':
+        // Deliberately nothing. See the note on this band in bands.ts: the sky and the catalogued stars
+        // are the picture from in here, and the arm ribbons would only be a flat fill over them.
+        break;
     }
   }
   ctx.globalAlpha = 1;
 }
 
 /**
- * The viewport expressed in the enclosing galaxy's coordinates, or null if the camera is above galaxy
- * level. Walks the focus lineage upwards accumulating child-to-parent scale factors, so it works
- * identically whether the galaxy is the focus node or six levels above it.
+ * The viewport expressed in the enclosing galaxy's coordinates -- as a centre and a half-extent -- or
+ * null if the camera is above galaxy level. Walks the focus lineage upwards accumulating child-to-parent
+ * scale factors, so it works identically whether the galaxy is the focus node or six levels above it.
  */
 function galaxyViewport(
   cam: Camera,
   tree: Tree,
   view: View,
-): { id: number; x0: number; x1: number; y0: number; y1: number } | null {
+): { id: number; nx: number; ny: number; halfW: number; halfH: number } | null {
   let node: Node | null = cam.node;
   let [nx, ny] = frameToNode(cam, cam.fx, cam.fy);
   // One unit of the current node, measured in units of whatever node we have climbed to.
@@ -410,9 +513,12 @@ function galaxyViewport(
 
   for (let i = 0; i < 10 && node; i++) {
     if (node.kind === 'galaxy') {
+      // Centre and half-extent, NOT two edges. By region depth the half-extent is about 2^-54 galaxy
+      // units, so both edges round to the same double and their difference is exactly zero -- which is
+      // how the starfield ended up with a lattice level of 1001 and hung the tab.
       const halfW = ((view.w / 2) / pxPerUnit(cam)) * 2 ** -cam.k * unitScale;
       const halfH = ((view.h / 2) / pxPerUnit(cam)) * 2 ** -cam.k * unitScale;
-      return { id: node.id, x0: nx - halfW, x1: nx + halfW, y0: ny - halfH, y1: ny + halfH };
+      return { id: node.id, nx, ny, halfW, halfH };
     }
     const ref = tree.refOf(node);
     const parent: Node | null = tree.parentOf(node);
@@ -423,6 +529,44 @@ function galaxyViewport(
     node = parent;
   }
   return null;
+}
+
+/**
+ * Daylight, once the enclosing planet is larger than the screen.
+ *
+ * Above this the planet is a body in space and its own disc is the picture. Below it you are inside the
+ * atmosphere, and what fills the frame is sky -- so the galaxy's starfield, correct out in the void, has
+ * to go. It fades in over the same range the planet's disc fades out, which is also the range over which
+ * regions become the map.
+ *
+ * Returns whether anything was drawn.
+ */
+function drawGround(frame: Frame): boolean {
+  const { ctx, cam, tree, view, diagonal } = frame;
+  let node: Node | null = cam.node;
+  // One unit of the current node measured in units of whatever node we have climbed to.
+  let unitScale = 1;
+  for (let i = 0; i < 10 && node; i++) {
+    if (node.kind === 'planet') break;
+    const ref = tree.refOf(node);
+    const parent: Node | null = tree.parentOf(node);
+    if (!ref || !parent) return false;
+    unitScale *= ref.rel;
+    node = parent;
+  }
+  if (!node || node.kind !== 'planet') return false;
+
+  // The planet's own radius on screen. `pxPerUnit` is per frame unit, and a frame is 2^-k of the focus
+  // node, which is itself `unitScale` of the planet.
+  const rPx = (pxPerUnit(cam) * 2 ** cam.k) / unitScale;
+  const alpha = smoothstep(1.1 * diagonal, 2.4 * diagonal, rPx);
+  if (alpha < 0.01) return false;
+
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = css(skyTone(planetTraitsFor(node, tree)));
+  ctx.fillRect(0, 0, view.w, view.h);
+  ctx.globalAlpha = 1;
+  return true;
 }
 
 const traitCache = new Map<number, GalaxyTraits>();
@@ -574,4 +718,51 @@ function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: numbe
   ctx.lineTo(x, y + rr);
   ctx.quadraticCurveTo(x, y, x + rr, y);
   ctx.closePath();
+}
+
+/**
+ * The scattered star under a screen point, found analytically rather than from the frame's hit list.
+ *
+ * A galaxy draws a few thousand catalogued systems. Recording them all as hit entries would allocate
+ * thousands of objects per frame, and capping the list left most of the stars you could see unclickable
+ * -- which is the difference between a map and a picture of one.
+ */
+export function scatterHitAt(
+  cam: Camera,
+  view: View,
+  sx: number,
+  sy: number,
+  grabPx = HIT_GRAB_PX,
+): HitEntry | null {
+  const level = LEVELS[cam.node.kind];
+  if (!level.child || level.placement !== 'scatter') return null;
+
+  const r = pxPerUnit(cam);
+  const nodeScale = 2 ** cam.k; // one node unit in frame units
+  if (nodeScale * r < SCATTER_MIN_PARENT_PX) return null;
+
+  // Screen point -> frame units -> node units.
+  const fx = cam.fx + (sx - view.w / 2) / r;
+  const fy = cam.fy + (sy - view.h / 2) / r;
+  const [nx, ny] = frameToNode(cam, fx, fy);
+
+  const ref = nearestScatter(cam.node, nx, ny);
+  if (!ref) return null;
+
+  const trueRPx = ref.rel * nodeScale * r;
+  const drawn = systemStarRadius(ref.id, trueRPx, nodeScale * r);
+  const grab = Math.max(drawn, grabPx);
+  // Compare in pixels, so the grab radius means the same thing at every depth.
+  const dxPx = (nx - ref.ox) * nodeScale * r;
+  const dyPx = (ny - ref.oy) * nodeScale * r;
+  if (dxPx * dxPx + dyPx * dyPx > grab * grab) return null;
+
+  return {
+    path: [...cam.node.path, ref.cell],
+    kind: ref.kind,
+    xPx: sx - dxPx,
+    yPx: sy - dyPx,
+    rPx: drawn,
+    trueRPx,
+  };
 }

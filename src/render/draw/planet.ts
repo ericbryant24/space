@@ -357,6 +357,23 @@ function paintRings(
  */
 export const PLANET_ICON_MIN_PX = 4.2;
 
+/**
+ * The colour of this world's daylight sky, seen from inside its atmosphere.
+ *
+ * Two ends of one ramp, as everywhere else: in space you draw light shapes on a dark ground, and on a
+ * surface you draw dark shapes on a light one. This is that light ground, and it is the planet's own
+ * atmosphere hue tinted by its own star, so a white-hot sun over a thin atmosphere gives a pale hard
+ * sky and a red dwarf over a thick one gives a dim orange afternoon.
+ */
+export function skyTone(t: PlanetTraits): Hsl {
+  const light = t.starLight;
+  const h = t.atmHue + hueDelta(t.atmHue, light.colour.h) * 0.3 * light.cls.sat;
+  const sat = 0.16 + 0.34 * Math.min(1, t.atmDensity) * (0.5 + 0.5 * light.cls.sat);
+  // A thin atmosphere over a bright star is not much lighter than the void; a thick one is nearly white.
+  const y = 0.1 + 0.62 * Math.min(1, t.atmDensity * 1.4) * (0.55 + 0.45 * light.cls.rel);
+  return { h, s: sat, l: solveL(h, sat, y) };
+}
+
 export function drawPlanetIcon(
   ctx: CanvasRenderingContext2D,
   cx: number,

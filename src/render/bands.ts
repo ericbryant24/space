@@ -35,8 +35,22 @@ export interface ActiveRep {
 export const BANDS: Readonly<Record<string, readonly BandSpec[]>> = {
   galaxy: [
     { rep: 'blob', in: [0.45, 1.2], out: [26, 64] },
-    { rep: 'wash', in: [26, 64], out: [900, 2200] },
-    { rep: 'arms', in: [900, 2200], out: [Infinity, Infinity] },
+    // The wash hands over to live arms at 110-320 px rather than 900-2200. The old thresholds meant a
+    // galaxy only resolved into structure once it was several screens wide, so at the size people
+    // actually look at one they saw a baked picture whose stars were not places. Live arms then only
+    // hold until 420 px, because past there the ribbon is bigger than the screen -- see 'deep'.
+    { rep: 'wash', in: [26, 64], out: [110, 320] },
+    { rep: 'arms', in: [110, 320], out: [420, 1700] },
+    // Deep inside, the arm ribbons stop being a picture of a galaxy and become a flat wall of colour:
+    // their edges are off screen, so all they contribute is fill. So they dissolve into `deep`, which
+    // draws nothing itself -- the picture there is the interior wash and the unresolved starfield,
+    // painted as the sky behind everything, plus the galaxy's own catalogued stars. That is the honest
+    // view from inside a galaxy: no structure you could resolve at arm's length, and stars.
+    //
+    // 420 px is where the ribbons' outer edges leave an 800 px-tall viewport; by 1700 px, about two and
+    // a half screens across, they are gone. The haze fades in over the same range -- see
+    // MAX_LATTICE_LEVEL and ARMS_FADE_PX in draw/galaxy.ts, which must match these numbers.
+    { rep: 'deep', in: [420, 1700], out: [Infinity, Infinity] },
   ],
   planet: [
     { rep: 'dot', in: [0.45, 1.2], out: [3, 9] },
