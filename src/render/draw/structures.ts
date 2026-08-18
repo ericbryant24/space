@@ -270,7 +270,67 @@ function building(
     ctx.fillRect(x - half, groundY, half * 2, footY - groundY);
   }
 
-  if (half * 2 >= FACADE_MIN_PX) {
+  /**
+   * THE SILHOUETTE AND THE ELEVATION ARE CROSSFADED, not switched.
+   *
+   * They are built from the same grammar -- the same roof shape at the same pitch, the same storey count, the same
+   * wall in the same ore -- so at the threshold they are the same mass in the same colour. But the elevation also
+   * has windows, a door, an eave, a sign in the world's own writing, and swapping one drawing for the other in a
+   * single frame put all of that on the wall at once. The silhouette is drawn first and the elevation ramped in
+   * over it, which reads as the detail resolving because that is exactly what it is; and because the elevation
+   * covers the same footprint, at full strength there is nothing of the silhouette left to see.
+   */
+  const detailed = smoothstep(FACADE_MIN_PX * 0.85, FACADE_MIN_PX * 1.35, half * 2);
+
+  // The silhouette. Mass, roof and one band of windows: everything that survives under twenty-six pixels.
+  if (detailed < 0.999) {
+    const s = surfaceColours(traits);
+    const shadowHue = traits.starLight.shadowHue;
+    const dark = Math.min(1, Math.max(0, (ore.metallicity - 0.1) / 0.9));
+    const y = Math.min(0.82, Math.max(0.12, 0.62 - dark * 0.34));
+    const sat = 0.1 + dark * 0.26;
+    const wall = daylight({ h: ore.hue, s: sat, l: solveL(ore.hue, sat, y) }, sky, shadowHue);
+    const storeyH = half * 2 * arch.verticality * 0.42;
+    const height = Math.min(half * 2 * MAX_ASPECT, storeyH * look.storeys);
+    const rise = half * arch.pitch;
+
+    ctx.fillStyle = css(wall);
+    ctx.fillRect(x - half, groundY - height, half * 2, height);
+    ctx.fillStyle = css(shade(wall, shadowHue, 1.1));
+    ctx.beginPath();
+    ctx.moveTo(x - half - half * arch.eave, groundY - height);
+    ctx.lineTo(x, groundY - height - rise);
+    ctx.lineTo(x + half + half * arch.eave, groundY - height);
+    ctx.closePath();
+    ctx.fill();
+
+    if (half * 2 > 9) {
+      // One window band, lit after dark. At this size a lit window is the only thing that says "someone is in".
+      const lit = sky.night > 0.3 && f01(hash2(id, 0x74)) < 0.6 * sky.night;
+      const w = Math.max(1, half * 0.3);
+      ctx.fillStyle = css(
+        lit
+          ? atLuminance({ h: (traits.starLight.colour.h + 42) % 360, s: 0.62, l: 0.7 }, 0.78)
+          : daylight({ h: traits.atmHue, s: 0.3, l: solveL(traits.atmHue, 0.3, 0.14) }, sky, shadowHue),
+      );
+      ctx.fillRect(x - w / 2, groundY - height * 0.62, w, Math.max(1, height * 0.2));
+    }
+    if (half * 2 > 6) {
+      ctx.strokeStyle = css(daylight(atLuminance(s.coast, Math.max(0.04, luminanceOf(s.coast))), sky, shadowHue));
+      ctx.lineWidth = Math.min(2.2, Math.max(0.8, half * 0.09));
+      ctx.beginPath();
+      ctx.moveTo(x - half, groundY);
+      ctx.lineTo(x - half, groundY - height);
+      ctx.lineTo(x, groundY - height - rise);
+      ctx.lineTo(x + half, groundY - height);
+      ctx.lineTo(x + half, groundY);
+      ctx.stroke();
+    }
+  }
+
+  // The full elevation, over the top of it, ramping in.
+  if (detailed > 0.001) {
+    ctx.globalAlpha = prevAlpha * alpha * detailed;
     const facade: Facade = {
       arch,
       look,
@@ -287,57 +347,7 @@ function building(
       planetId: g.planetId,
     };
     drawFacade(ctx, x, groundY, half, facade);
-    ctx.globalAlpha = prevAlpha;
-    return;
   }
 
-  /**
-   * The silhouette. Mass, roof and one band of windows: everything that survives under twenty-six pixels.
-   *
-   * Built from the SAME grammar as the full elevation -- the same roof shape at the same pitch, the same storey
-   * count -- so growing across the threshold refines the drawing instead of replacing it. That is the rule that
-   * makes every crossfade in this project invisible, applied at the smallest scale it applies at.
-   */
-  const s = surfaceColours(traits);
-  const shadowHue = traits.starLight.shadowHue;
-  const dark = Math.min(1, Math.max(0, (ore.metallicity - 0.1) / 0.9));
-  const y = Math.min(0.82, Math.max(0.12, 0.62 - dark * 0.34));
-  const wall = daylight({ h: ore.hue, s: 0.1 + dark * 0.26, l: solveL(ore.hue, 0.1 + dark * 0.26, y) }, sky, shadowHue);
-  const storeyH = half * 2 * arch.verticality * 0.42;
-  const height = Math.min(half * 2 * MAX_ASPECT, storeyH * look.storeys);
-  const rise = half * arch.pitch;
-
-  ctx.fillStyle = css(wall);
-  ctx.fillRect(x - half, groundY - height, half * 2, height);
-  ctx.fillStyle = css(shade(wall, shadowHue, 1.1));
-  ctx.beginPath();
-  ctx.moveTo(x - half - half * arch.eave, groundY - height);
-  ctx.lineTo(x, groundY - height - rise);
-  ctx.lineTo(x + half + half * arch.eave, groundY - height);
-  ctx.closePath();
-  ctx.fill();
-
-  if (half * 2 > 9) {
-    // One window band, lit after dark. At this size a lit window is the only thing that says "someone is in".
-    const lit = sky.night > 0.3 && f01(hash2(id, 0x74)) < 0.6 * sky.night;
-    const w = Math.max(1, half * 0.3);
-    ctx.fillStyle = css(
-      lit
-        ? atLuminance({ h: (traits.starLight.colour.h + 42) % 360, s: 0.62, l: 0.7 }, 0.78)
-        : daylight({ h: traits.atmHue, s: 0.3, l: solveL(traits.atmHue, 0.3, 0.14) }, sky, shadowHue),
-    );
-    ctx.fillRect(x - w / 2, groundY - height * 0.62, w, Math.max(1, height * 0.2));
-  }
-  if (half * 2 > 6) {
-    ctx.strokeStyle = css(daylight(atLuminance(s.coast, Math.max(0.04, luminanceOf(s.coast))), sky, shadowHue));
-    ctx.lineWidth = Math.min(2.2, Math.max(0.8, half * 0.09));
-    ctx.beginPath();
-    ctx.moveTo(x - half, groundY);
-    ctx.lineTo(x - half, groundY - height);
-    ctx.lineTo(x, groundY - height - rise);
-    ctx.lineTo(x + half, groundY - height);
-    ctx.lineTo(x + half, groundY);
-    ctx.stroke();
-  }
   ctx.globalAlpha = prevAlpha;
 }
