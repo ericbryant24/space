@@ -76,11 +76,21 @@ const PLANET_METRES = 2 ** LEVELS.planet.logSpan;
  */
 let frameSky: Sky | null = null;
 /** The viewport, for the same reason: the disc painter has no view argument and most of a big disc is off screen. */
-let frameView = { w: 0, h: 0, diagonal: 1 };
+let frameView = { w: 0, h: 0, diagonal: 1, cosUp: 1, sinUp: 0 };
 
-export function beginGroundFrame(sky: Sky | null, w: number, h: number): void {
+/**
+ * `up` is the scene rotation, and the disc painter needs it to know where the window is.
+ *
+ * The canvas is turned about the disc's own centre before the body is painted, so inside the painter the viewport
+ * is a rotated rectangle. Turning the direction to its centre back by the same angle is all that takes -- the
+ * DISTANCE to it is unaffected by a rotation about the centre, which is why only one angle is needed here and not
+ * a transform. Frame state rather than an argument because it is a frame-level fact: the only rotation a planet's
+ * disc is ever drawn under is the scene's own, since a planet turned by anything else is one seen from inside a
+ * region, and by then it is far past the size at which it stops drawing itself. See PLANET_MAX_DIAGONALS.
+ */
+export function beginGroundFrame(sky: Sky | null, w: number, h: number, up: number): void {
   frameSky = sky;
-  frameView = { w, h, diagonal: Math.hypot(w, h) };
+  frameView = { w, h, diagonal: Math.hypot(w, h), cosUp: Math.cos(up), sinUp: Math.sin(up) };
 }
 
 /**
@@ -94,10 +104,13 @@ export function beginGroundFrame(sky: Sky | null, w: number, h: number): void {
  * a point on the surface. Null means the whole circle is in play, which is the common case and the cheap one.
  */
 function visibleArc(cx: number, cy: number, r: number): { from: number; to: number } | null {
-  const { w, h, diagonal } = frameView;
+  const { w, h, diagonal, cosUp, sinUp } = frameView;
   if (r < diagonal) return null;
-  const vx = w / 2 - cx;
-  const vy = h / 2 - cy;
+  const sx = w / 2 - cx;
+  const sy = h / 2 - cy;
+  // The middle of the window, turned back into the frame the disc is painted in.
+  const vx = cosUp * sx + sinUp * sy;
+  const vy = cosUp * sy - sinUp * sx;
   const d = Math.hypot(vx, vy);
   const reach = diagonal / 2 + r * PLATE_RIND;
   if (d <= reach) return null;

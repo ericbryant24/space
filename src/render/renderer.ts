@@ -296,9 +296,6 @@ export function render(
    * The sky is built here, once, because every plate has to agree about where the star is -- see Frame.sky.
    */
   frame.sky = buildSky(frame, cxF, cyF);
-  // The planet's own disc is reached through the space-mode painter, which has no sky argument to take one, so
-  // it is handed the frame's sky here instead. See `beginGroundFrame`.
-  beginGroundFrame(frame.sky, view.w, view.h);
   if (drawGround(frame)) stats.draws++;
 
   /**
@@ -311,6 +308,10 @@ export function render(
   frame.up = upAngleFor(cam, frame.sky ? frame.sky.groundAlpha : 0);
   frame.cosUp = Math.cos(frame.up);
   frame.sinUp = Math.sin(frame.up);
+
+  // The planet's own disc is reached through the space-mode painter, which has no sky or viewport argument to take
+  // one, so it is handed the frame's here instead. See `beginGroundFrame`.
+  beginGroundFrame(frame.sky, view.w, view.h, frame.up);
 
   paint(frame, node, centreX, centreY, ax, ay, 0);
   stats.spritesPending = spritesPending();
