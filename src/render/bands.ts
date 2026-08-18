@@ -43,13 +43,12 @@ export const BANDS: Readonly<Record<string, readonly BandSpec[]>> = {
     { rep: 'arms', in: [110, 320], out: [420, 1700] },
     // Deep inside, the arm ribbons stop being a picture of a galaxy and become a flat wall of colour:
     // their edges are off screen, so all they contribute is fill. So they dissolve into `deep`, which
-    // draws nothing itself -- the picture there is the interior wash and the unresolved starfield,
-    // painted as the sky behind everything, plus the galaxy's own catalogued stars. That is the honest
-    // view from inside a galaxy: no structure you could resolve at arm's length, and stars.
+    // draws nothing itself -- the view from in there is the galaxy's diffuse glow, which strengthens over
+    // this exact range, and the galaxy's own catalogued stars. That is the honest picture of interstellar
+    // space: no structure you could resolve at arm's length, and real stars with real names.
     //
-    // 420 px is where the ribbons' outer edges leave an 800 px-tall viewport; by 1700 px, about two and
-    // a half screens across, they are gone. The haze fades in over the same range -- see
-    // MAX_LATTICE_LEVEL and ARMS_FADE_PX in draw/galaxy.ts, which must match these numbers.
+    // 420 px is where the ribbons' outer edges leave an 800 px-tall viewport; by 1700 px, about two and a
+    // half screens across, they are gone. ARMS_FADE_PX in draw/galaxy.ts must match these numbers.
     { rep: 'deep', in: [420, 1700], out: [Infinity, Infinity] },
   ],
   planet: [

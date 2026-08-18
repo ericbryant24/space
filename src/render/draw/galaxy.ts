@@ -1,14 +1,20 @@
 import { f01, hash3, hash4, mix, sm32 } from '../../core/rng.ts';
 import { armDensity, type GalaxyTraits } from '../../universe/gen/galaxy.ts';
-import { css, shade, type Hsl } from '../color.ts';
+import { css, hslToRgb, shade, type Hsl } from '../color.ts';
 import { outlineWidth, smoothstep } from '../bands.ts';
 import { getScratch, getSpriteBudgeted, sizeBucket, type Sprite } from '../sprites.ts';
 
 /**
- * Galaxies are SHAPES WITH OUTLINES, not particle fog. Fog is what makes every procedural space
- * project look identical, so arms are drawn as filled ribbons first and stars stippled on top second.
+ * Galaxies are SHAPES WITH OUTLINES, not particle fog. Fog is what makes every procedural space project
+ * look identical, so a galaxy is filled ribbons, a bar, and a core -- continuous forms, all of them.
  *
- * All three representations -- blurred blob, baked wash, individual arms -- are rendered from the same
+ * NOTHING HERE DRAWS A STAR. Not one point, at any zoom. Every star on screen inside a galaxy is one of
+ * that galaxy's catalogued systems: a node with an address, a name, and a place you can travel to. What
+ * this file contributes is the light of the hundred billion stars too faint to resolve, as diffuse glow
+ * -- which is not a lie about what is there, because glow is what unresolved starlight actually looks
+ * like. A 2 px white dot is a lie: it promises a discrete thing you could aim at.
+ *
+ * All three representations -- blurred blob, baked wash, live arms -- are rendered from the same
  * `armDensity` field, which is why they cross-fade without a seam instead of morphing.
  */
 
@@ -200,31 +206,6 @@ function paintRing(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: num
   }
 }
 
-/** Stars stippled inside the density field, as fillRects -- never arcs, which cost several times more. */
-function paintStars(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: GalaxyTraits, budget: number): number {
-  const p = t.palette;
-  const tones = [css(p.PAPER, 0.95), css(p.LIGHT, 0.9), css(p.ACCENT, 0.85), css(p.MID, 0.8)];
-  const want = Math.min(budget, t.starCount);
-  let drawn = 0;
-  let h = sm32(0x51a55);
-  ctx.globalCompositeOperation = 'lighter';
-  for (let i = 0; i < want * 3 && drawn < want; i++) {
-    h = sm32(h);
-    const x = f01(h) * 2 - 1;
-    h = sm32(h);
-    const y = f01(h) * 2 - 1;
-    h = sm32(h);
-    if (f01(h) > armDensity(t, x, y)) continue;
-    h = sm32(h);
-    const size = 1 + Math.floor(f01(h) * 2.4);
-    ctx.fillStyle = tones[(h >>> 11) % tones.length]!;
-    ctx.fillRect(cx + x * r - size / 2, cy + y * r - size / 2, size, size);
-    drawn++;
-  }
-  ctx.globalCompositeOperation = 'source-over';
-  return drawn;
-}
-
 /** Everything except the stipple. Shared by the live path and the baked sprite. */
 function paintStructure(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: GalaxyTraits): void {
   switch (t.morphology) {
@@ -270,7 +251,6 @@ export function galaxySprite(
       ctx.filter = `blur(${Math.max(2, s / 12).toFixed(1)}px)`;
     }
     paintStructure(ctx, s / 2, s / 2, r, t);
-    paintStars(ctx, s / 2, s / 2, r, t, blurred ? 40 : 1400);
     ctx.filter = 'none';
   });
 }
@@ -353,15 +333,14 @@ export function drawGalaxyStandIn(
   ctx.fill();
 }
 
-
 /**
- * SCALE QUANTISATION -- the idea both the cloud and the starfield depend on.
+ * SCALE QUANTISATION -- what keeps the diffuse glow from boiling as you zoom.
  *
- * The first version derived its lattice spacing and its noise frequency from the viewport span, with a
- * comment saying this kept stars still "while panning". That was true, and it missed the gesture people
- * actually use: while ZOOMING the span changes every frame, so the lattice rescaled every frame and
- * every star jumped to a new position. The reported symptom was stars shooting past at random, and that
- * is exactly what it was -- the field was being re-randomised sixty times a second.
+ * The first version derived its noise frequency from the viewport span, with a comment saying this kept
+ * features still "while panning". That was true, and it missed the gesture people actually use: while
+ * ZOOMING the span changes every frame, so the field rescaled every frame and every feature moved. Back
+ * when this also drove a point starfield the symptom was unmissable -- stars shooting past at random,
+ * because the field was being re-randomised sixty times a second.
  *
  * The fix is to anchor everything to POWERS OF TWO in galaxy space, so a given level's features have
  * fixed positions no matter how the camera moves, and to blend two adjacent levels with weights that
@@ -369,8 +348,8 @@ export function drawGalaxyStandIn(
  *
  *     w(n) = max(0, 1 - |nf - n|)      sums to exactly 1 for any nf
  *
- * Only two levels are ever non-zero. Coarse features drift outward with correct parallax and dim as
- * they spread; finer ones fade in between them. That is what an infinite starfield actually looks like.
+ * Only two levels are ever non-zero. Coarse features drift outward with correct parallax and dim as they
+ * spread; finer ones fade in between them, so descending reveals detail instead of replacing it.
  */
 export function scaleLevels(nf: number): [number, number, number] {
   const n0 = Math.floor(nf);
@@ -412,44 +391,52 @@ function clusterAt(x: number, y: number, level: number): number {
 
 const WASH_W = 64;
 const WASH_H = 40;
-/** Target on-screen size of one cloud feature and one starfield cell, in pixels. */
-const CLOUD_FEATURE_PX = 300;
-const STAR_PITCH_PX = 38;
 
 /**
- * Must stay equal to the `arms` band's fade-out range in bands.ts: arm structure leaving and unresolved
- * haze arriving are two halves of one crossfade, and if the numbers drift apart there is a stretch of
- * zoom where neither is drawn.
+ * One reused pixel buffer for the glow. `getImageData` would hand back a fresh 10 KB array every frame,
+ * which is 600 KB a second of garbage for a buffer whose size never changes.
+ */
+let wash: ImageData | null = null;
+function washBuffer(): ImageData {
+  if (!wash) wash = new ImageData(WASH_W, WASH_H);
+  return wash;
+}
+/** Target on-screen size of one feature of the diffuse glow, in pixels. */
+const CLOUD_FEATURE_PX = 300;
+/**
+ * Must stay equal to the `arms` band's fade-out range in bands.ts: arm structure leaving and diffuse glow
+ * taking over are two halves of one crossfade, and if the numbers drift apart there is a stretch of zoom
+ * where neither carries the view.
  */
 const ARMS_FADE_PX: readonly [number, number] = [420, 1700];
 
 /**
- * The depth at which the sky stops resolving finer -- and the one place in this project that needed a
- * limit like this.
+ * The depth at which the diffuse glow stops resolving finer -- and the one place in this project that
+ * needed a limit like this.
  *
  * Everything else navigates by a focus frame normalised to radius 1, precisely so no coordinate ever has
- * to carry 76 bits of range. The starfield broke that rule: its lattice is indexed in absolute GALAXY
- * units, and by planet depth a cell index came out around 2^57. Float64 holds integers exactly only to
- * 2^53; past that, adjacent doubles are 4 or more apart, so `i++` leaves `i` unchanged and
- * `for (let i = i0; i <= i1; i++)` spins forever. Zooming in on a planet anywhere but the exact galactic
- * centre locked the tab up hard.
+ * to carry 76 bits of range. The sky is the exception: it is sampled in absolute GALAXY units, so its
+ * detail level grows without bound as you descend, and by planet depth a noise cell index came out around
+ * 2^57. Float64 holds integers exactly only to 2^53; past that, adjacent doubles are 4 or more apart, so
+ * `i++` leaves `i` unchanged. When the old point starfield counted through cells that way it spun
+ * forever, and zooming in on a planet anywhere but the exact galactic centre locked the tab up hard. The
+ * points are gone now, but the interpolated noise degenerates on the same boundary, so the cap stays.
  *
- * The fix is also the physically honest answer: stars are effectively at infinity. Moving a few thousand
- * kilometres inside a solar system does not shift the constellations, so below this depth the lattice
- * stops subdividing and the field stops parallaxing -- the sky is widened by the same factor the zoom
- * narrowed it, which holds it fixed on screen. Level 44 leaves nine bits of headroom at the deepest
- * index the two drawn levels can reach.
+ * It is also the physically honest answer: from inside a solar system, moving a few thousand kilometres
+ * does not change what the rest of the galaxy looks like. Below this depth the sky stops subdividing and
+ * stops parallaxing -- it is widened by the same factor the zoom narrowed it, which holds it fixed.
+ * Level 44 leaves eight bits of headroom at the finest level the glow samples.
  */
-export const MAX_LATTICE_LEVEL = 44;
+export const MAX_SKY_DETAIL_LEVEL = 44;
 
 /**
  * The sky's bounds in galaxy units, widened if we are past the freeze depth.
  *
  * Takes a CENTRE and a HALF-EXTENT rather than two edges, and that is not a style preference: at region
  * depth the half-extent is about 2^-54 galaxy units, so `nx - halfW` and `nx + halfW` round to the same
- * double and their difference is exactly zero. Deriving the scale from that zero gave a lattice level of
- * 1001 and cell indices around 2e300, which is how the freeze got bypassed and the hang came back at a
- * level further down. The scale has to come from `halfW` itself, which never underflows.
+ * double and their difference is exactly zero. Deriving the scale from that zero gave a detail level of
+ * 1001 and cell indices around 2e300, which is how the freeze got bypassed and the hang came back four
+ * rungs further down. The scale has to come from `halfW` itself, which never underflows.
  */
 export function skyBounds(
   nx: number,
@@ -459,7 +446,7 @@ export function skyBounds(
   viewW: number,
 ): { x0: number; x1: number; y0: number; y1: number; pxPerUnit: number; rawPxPerUnit: number } {
   const rawPxPerUnit = viewW / (2 * Math.max(Number.MIN_VALUE, halfW));
-  const freeze = latticeFreeze(rawPxPerUnit);
+  const freeze = skyFreeze(rawPxPerUnit);
   const hw = halfW * freeze;
   const hh = halfH * freeze;
   return {
@@ -473,16 +460,16 @@ export function skyBounds(
 }
 
 /**
- * How much to widen the sky so its lattice never subdivides past MAX_LATTICE_LEVEL. 1 means "not frozen
+ * How much to widen the sky so its noise never samples past MAX_SKY_DETAIL_LEVEL. 1 means "not frozen
  * yet". Exported so a test can assert the resulting cell indices stay exact integers.
  */
-export function latticeFreeze(rawPxPerUnit: number): number {
-  return Math.max(1, rawPxPerUnit / (STAR_PITCH_PX * 2 ** MAX_LATTICE_LEVEL));
+export function skyFreeze(rawPxPerUnit: number): number {
+  return Math.max(1, rawPxPerUnit / (CLOUD_FEATURE_PX * 2 ** MAX_SKY_DETAIL_LEVEL));
 }
 
-/** The lattice level the sky settles on, given the galaxy's true radius in pixels. */
-export function latticeLevel(rawPxPerUnit: number): number {
-  return Math.floor(Math.log2(rawPxPerUnit / latticeFreeze(rawPxPerUnit) / STAR_PITCH_PX));
+/** The detail level the glow settles on, given the galaxy's true radius in pixels. */
+export function skyDetailLevel(rawPxPerUnit: number): number {
+  return Math.floor(Math.log2(rawPxPerUnit / skyFreeze(rawPxPerUnit) / CLOUD_FEATURE_PX));
 }
 
 export function drawGalaxyInterior(
@@ -507,174 +494,59 @@ export function drawGalaxyInterior(
   if (Math.hypot(nearestX, nearestY) > 1.05) return;
 
   /**
-   * Unresolved points belong only where the galaxy is far larger than the screen -- deep between the
-   * stars, where no individual star is a plausible destination and the sky is genuinely a haze.
-   *
-   * At galaxy zoom the galaxy's own catalogued systems are drawn as real stars, and adding a second,
-   * unreachable population on top of them is what made pointing at a star do nothing: most of the stars
-   * you could see went nowhere. So the haze fades in over exactly the range the arm ribbons fade out, by
-   * which point the catalogued stars have grown to their capped symbol size and carry haloes and
-   * sparkles. A 12 px star with a halo beside a 1 px speck is not a target anyone confuses.
-   *
-   * `rawPxPerUnit` IS the galaxy's radius in pixels, because a galaxy is one unit of its own space.
+   * The glow strengthens exactly as the arm ribbons fade out, so the two are one crossfade rather than
+   * two independent knobs. Out at galaxy zoom the ribbons are the picture and the glow is a hint between
+   * them; deep inside, the ribbons are gone and the glow IS the picture -- the light of every star too
+   * faint to have its own entry in the catalogue.
    */
-  const hazeAlpha = smoothstep(ARMS_FADE_PX[0], ARMS_FADE_PX[1], rawPxPerUnit);
+  const deep = smoothstep(ARMS_FADE_PX[0], ARMS_FADE_PX[1], rawPxPerUnit);
 
   const [cloudLevel, wCoarse, wFine] = scaleLevels(Math.log2(pxPerUnit / CLOUD_FEATURE_PX));
 
   const { surface, ctx: wctx } = getScratch(WASH_W);
   const p = t.palette;
-  const glow = css(p.MID, 1);
-  const bright = css(p.LIGHT, 1);
+  const [gr, gg, gb] = hslToRgb(p.MID.h, p.MID.s, p.MID.l);
+  const [br, bg, bb] = hslToRgb(p.LIGHT.h, p.LIGHT.s, p.LIGHT.l);
 
+  /**
+   * EVERY CELL GETS WRITTEN, AND NOTHING IS THRESHOLDED. The field is magnified about twenty times on its
+   * way to the screen, so any discontinuity in it -- a skipped cell, a hue that flips at a cutoff --
+   * becomes a hard stair-stepped edge dozens of pixels long. Two earlier shortcuts did exactly that: cells
+   * below a density floor were skipped entirely, and the tone snapped from MID to LIGHT at a texture of
+   * 0.72. Deep inside a galaxy that produced blocky slabs of colour.
+   *
+   * Written straight into an ImageData buffer, not with fillRect. Once nothing is skipped that is 2,560
+   * cells every frame, and a fillRect each with its own alpha and fillStyle spent more time changing
+   * canvas state than filling pixels -- it doubled the cost of a galaxy frame on its own.
+   */
+  const image = washBuffer();
+  const px = image.data;
   for (let j = 0; j < WASH_H; j++) {
     const gy = y0 + ((j + 0.5) / WASH_H) * (y1 - y0);
     for (let i = 0; i < WASH_W; i++) {
       const gx = x0 + ((i + 0.5) / WASH_W) * (x1 - x0);
       const density = armDensity(t, gx, gy);
-      if (density <= 0.02) continue;
-      const texture =
-        cloudAt(gx, gy, cloudLevel) * wCoarse + cloudAt(gx, gy, cloudLevel + 1) * wFine;
+      const texture = cloudAt(gx, gy, cloudLevel) * wCoarse + cloudAt(gx, gy, cloudLevel + 1) * wFine;
       // Diffuse, unresolved emission: dim and additive, never a covering layer.
-      const a = density * (0.25 + 0.75 * texture) * 0.3;
-      if (a < 0.01) continue;
-      wctx.globalAlpha = Math.min(0.55, a);
-      wctx.fillStyle = texture > 0.72 ? bright : glow;
-      wctx.fillRect(i, j, 1, 1);
+      const a = Math.min(0.62, density * (0.25 + 0.75 * texture) * (0.3 + 0.16 * deep));
+      // The bright cores of the clouds blend in continuously rather than switching tone at a threshold.
+      const hot = Math.max(0, Math.min(1, (texture - 0.58) / 0.42));
+      const o = (j * WASH_W + i) * 4;
+      px[o] = gr + (br - gr) * hot;
+      px[o + 1] = gg + (bg - gg) * hot;
+      px[o + 2] = gb + (bb - gb) * hot;
+      px[o + 3] = a * 255;
     }
   }
-  wctx.globalAlpha = 1;
+  wctx.putImageData(image, 0, 0);
 
   const smoothing = ctx.imageSmoothingEnabled;
   ctx.imageSmoothingEnabled = true;
   // Emission adds to the void rather than painting over it.
   ctx.globalCompositeOperation = 'lighter';
-  ctx.globalAlpha = 0.75;
+  ctx.globalAlpha = 0.75 + 0.12 * deep;
   ctx.drawImage(surface as CanvasImageSource, 0, 0, WASH_W, WASH_H, 0, 0, viewW, viewH);
   ctx.globalAlpha = 1;
   ctx.globalCompositeOperation = 'source-over';
   ctx.imageSmoothingEnabled = smoothing;
-
-  if (hazeAlpha > 0.01) {
-    drawStarfield(ctx, t, x0, x1, y0, y1, viewW, viewH, pxPerUnit, cloudLevel, hazeAlpha);
-  }
-}
-
-/**
- * Point stars on a power-of-two lattice in galaxy space.
- *
- * Star positions are therefore FIXED: zooming moves them outward with correct parallax instead of
- * shuffling them. Two lattice levels are drawn, weighted so their contributions sum to one, so finer
- * stars fade in between coarser ones as you descend and nothing ever pops.
- *
- * Drawing matters as much as generating. Two thousand separate fillRect calls, each preceded by a
- * fillStyle change and wrapped in additive blending, produced a periodic 210 ms stall, so the points
- * are batched into one path per colour per level.
- */
-const TONE_COUNT = 4;
-const MAX_POINTS = 9000;
-/** Defensive bound: never iterate more lattice cells than this per level. */
-const MAX_CELLS = 24000;
-
-const pointX: Float32Array[] = [];
-const pointY: Float32Array[] = [];
-const pointS: Float32Array[] = [];
-const pointN: number[] = [];
-for (let i = 0; i < TONE_COUNT; i++) {
-  pointX.push(new Float32Array(MAX_POINTS));
-  pointY.push(new Float32Array(MAX_POINTS));
-  pointS.push(new Float32Array(MAX_POINTS));
-  pointN.push(0);
-}
-
-function drawStarfield(
-  ctx: CanvasRenderingContext2D,
-  t: GalaxyTraits,
-  x0: number,
-  x1: number,
-  y0: number,
-  y1: number,
-  viewW: number,
-  viewH: number,
-  pxPerUnit: number,
-  cloudLevel: number,
-  /** Fades the whole unresolved population in as the resolved one thins out. */
-  hazeAlpha: number,
-): void {
-  const p = t.palette;
-  // Blending two levels splits each star's light between them, so the tones sit brighter than they
-  // would for a single-level field. A handful of stars are brighter and larger than the rest, because a
-  // field of uniform dots reads as dust rather than as stars.
-  const tones = [css(p.PAPER, 1), css(p.LIGHT, 0.92), css(p.ACCENT, 0.8), css(p.PAPER, 1)];
-  const [level, wCoarse, wFine] = scaleLevels(Math.log2(pxPerUnit / STAR_PITCH_PX));
-
-  for (const [n, weight] of [
-    [level, wCoarse],
-    [level + 1, wFine],
-  ] as const) {
-    if (weight <= 0.004) continue;
-    emitLevel(t, x0, x1, y0, y1, viewW, viewH, n, cloudLevel);
-    ctx.globalAlpha = weight * hazeAlpha;
-    for (let tone = 0; tone < TONE_COUNT; tone++) {
-      const count = pointN[tone]!;
-      if (count === 0) continue;
-      const xs = pointX[tone]!;
-      const ys = pointY[tone]!;
-      const ss = pointS[tone]!;
-      ctx.fillStyle = tones[tone]!;
-      ctx.beginPath();
-      for (let k = 0; k < count; k++) ctx.rect(xs[k]!, ys[k]!, ss[k]!, ss[k]!);
-      ctx.fill();
-    }
-  }
-  ctx.globalAlpha = 1;
-}
-
-/** Fill the point buffers with one lattice level's stars, in screen coordinates. */
-function emitLevel(
-  t: GalaxyTraits,
-  x0: number,
-  x1: number,
-  y0: number,
-  y1: number,
-  viewW: number,
-  viewH: number,
-  level: number,
-  cloudLevel: number,
-): void {
-  for (let i = 0; i < TONE_COUNT; i++) pointN[i] = 0;
-
-  const cell = 2 ** -level; // galaxy units, a fixed power of two
-  const i0 = Math.floor(x0 / cell);
-  const i1 = Math.floor(x1 / cell);
-  const j0 = Math.floor(y0 / cell);
-  const j1 = Math.floor(y1 / cell);
-  if ((i1 - i0 + 2) * (j1 - j0 + 2) > MAX_CELLS) return;
-
-  const sxScale = viewW / (x1 - x0);
-  const syScale = viewH / (y1 - y0);
-
-  for (let j = j0; j <= j1 + 1; j++) {
-    for (let i = i0; i <= i1 + 1; i++) {
-      const h = hash4(i, j, level, 0x5747);
-      // Fixed position within a fixed cell: the star lives at this point in galaxy space forever.
-      const gx = (i + f01(h)) * cell;
-      const gy = (j + f01(mix(h, 1))) * cell;
-      const arm = armDensity(t, gx, gy);
-      if (arm <= 0.02) continue;
-      // Stars cluster where the cloud is thick, so the field and the wash agree.
-      const d = arm * (0.35 + 0.9 * clusterAt(gx, gy, cloudLevel));
-      if (f01(mix(h, 2)) > d * 0.95) continue;
-      // Tone 3 is the rare bright one: about one star in fourteen.
-      const roll = (h >>> 9) % 42;
-      const tone = roll < 3 ? 3 : roll % 3;
-      const n = pointN[tone]!;
-      if (n >= MAX_POINTS) continue;
-      const size = (tone === 3 ? 2 : 1) + Math.floor(f01(mix(h, 3)) * 2.2);
-      pointX[tone]![n] = (gx - x0) * sxScale - size / 2;
-      pointY[tone]![n] = (gy - y0) * syScale - size / 2;
-      pointS[tone]![n] = size;
-      pointN[tone] = n + 1;
-    }
-  }
 }

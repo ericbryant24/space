@@ -5,7 +5,15 @@ import { ascend, updateFocus } from './camera/rebase.ts';
 import { setSimTime } from './core/clock.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, stepInput } from './input/pointer.ts';
-import { drawHover, hitTest, hoverLabel, render, scatterHitAt, type HitEntry } from './render/renderer.ts';
+import {
+  drawHover,
+  hitTest,
+  hoverLabel,
+  render,
+  scatterHitAt,
+  setRecordAllHits,
+  type HitEntry,
+} from './render/renderer.ts';
 import { childNear, childrenNear } from './universe/node.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
@@ -376,10 +384,22 @@ Object.assign(window as unknown as Record<string, unknown>, {
         : null,
     };
   },
+  /** Make the renderer report every mark it draws, including scattered stars. See `setRecordAllHits`. */
+  __recordAllHits: (on: boolean): void => {
+    setRecordAllHits(on);
+    loop.wake();
+  },
   /** What a click at this point would resolve to. Used by the navigation checks. */
   __pick: (x: number, y: number) => {
     const hit = pick(x, y);
-    return hit ? { kind: hit.kind, x: hit.xPx, y: hit.yPx, r: hit.rPx } : null;
+    if (!hit) return null;
+    return {
+      kind: hit.kind,
+      path: hit.path.map((c) => `${c.cx}.${c.cy}`).join('/'),
+      x: hit.xPx,
+      y: hit.yPx,
+      r: hit.rPx,
+    };
   },
   __hits: () =>
     lastHits.map((h) => ({

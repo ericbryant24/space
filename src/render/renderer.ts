@@ -24,6 +24,7 @@ import {
   drawStar,
   flushStarBatch,
   queueSystemStar,
+  starGlyphRadius,
   systemStarRadius,
 } from './draw/containers.ts';
 import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
@@ -45,7 +46,7 @@ const MAX_SELF_DRAW_DIAGONALS = 2.5;
 /**
  * A planet keeps drawing its own surface long past the general limit, because its regions do not become
  * areas until it is several screens across, and dropping the disc at 2.5 diagonals left a stretch of
- * bare starfield in between.
+ * bare sky in between.
  *
  * But not without limit. The illustration is built from shapes measured in planet radii -- a terminator
  * rect at 1.2r, ring ellipses out to 1.9r, a rim-light arc stroked at 0.045r -- and at forty thousand
@@ -58,6 +59,18 @@ const MAX_DEPTH = 5;
 const DRAW_BUDGET = 12000;
 const CELL_BUDGET = 24000;
 const LABEL_BUDGET = 90;
+/**
+ * Records scattered stars in the hit list, which normal frames deliberately do not do -- there can be a
+ * couple of thousand on screen, and `scatterHitAt` finds them analytically instead.
+ *
+ * Only `tools/real-check.ts` turns this on. It needs the renderer's own account of what it drew and
+ * where, so it can check that every mark on screen is a place you can travel to; recomputing the
+ * positions itself would only prove that two copies of the same arithmetic agree.
+ */
+let recordAllHits = false;
+export function setRecordAllHits(on: boolean): void {
+  recordAllHits = on;
+}
 const LABEL_MIN_PX = 26;
 /** Anything at least this big on screen becomes a click target. */
 const HIT_MIN_PX = 2.5;
@@ -195,18 +208,17 @@ export function render(
   }
   stats.topKind = node.kind;
 
-  // The sky. Whenever the camera is inside a galaxy -- at ANY depth below it, right down to standing
-  // next to a building -- the enclosing galaxy's starfield is the backdrop, because you can still see
-  // stars from between two planets. Without this, the long stretches where the galaxy is bigger than
-  // the screen and its systems are still sub-pixel rendered as a blank screen.
+  // The sky. Whenever the camera is inside a galaxy -- at ANY depth below it, right down to standing next
+  // to a building -- the enclosing galaxy's diffuse glow is the backdrop, because the rest of the galaxy
+  // does not stop existing when you descend into one corner of it. Without this, the long stretches where
+  // the galaxy is bigger than the screen and its systems are still sub-pixel rendered as a blank screen.
   const sky = galaxyViewport(cam, tree, view);
   if (sky) {
     drawGalaxyInterior(ctx, galaxyTraitsCached(sky.id), sky.nx, sky.ny, sky.halfW, sky.halfH, view.w, view.h);
     stats.draws++;
   }
-  // Standing on a world, the sky is not the galaxy: it is daylight. Painted over the starfield rather
-  // than instead of it, so the handover is a crossfade and the stars are still there at the moment the
-  // atmosphere thickens.
+  // Standing on a world, the sky is not the galaxy: it is daylight. Painted over the glow rather than
+  // instead of it, so the handover is a crossfade rather than a switch.
   if (drawGround(frame)) stats.draws++;
 
   paint(frame, node, centreX, centreY, scale, 0);
@@ -256,8 +268,8 @@ function paint(
     // so recording them would either blow the cap -- leaving most of the visible stars unclickable -- or
     // allocate thousands of objects every frame. `scatterHit` finds them analytically instead, which is
     // both exact and allocation-free.
-    const recordable = !(node.kind === 'system' && schematic);
-    if (recordable && hitR >= HIT_MIN_PX && stats.hits.length < 600) {
+    const recordable = recordAllHits || !(node.kind === 'system' && schematic);
+    if (recordable && hitR >= HIT_MIN_PX && stats.hits.length < (recordAllHits ? 8000 : 600)) {
       stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR, trueRPx });
     }
     if (hitR >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
@@ -370,8 +382,8 @@ function paint(
 const CONTAINER: Partial<Record<Kind, number>> = {
   field: 0.5,
   cluster: 0.85,
-  // Interplanetary space is empty and dark. A strong wash here turned every system into a warm haze
-  // and hid the starfield behind it, so a system gets little more than its boundary and its orbits.
+  // Interplanetary space is empty and dark. A strong wash here turned every system into a warm haze and
+  // hid the galaxy behind it, so a system gets little more than its boundary and its orbits.
   system: 0.14,
   region: 1,
   settlement: 1,
@@ -515,7 +527,7 @@ function galaxyViewport(
     if (node.kind === 'galaxy') {
       // Centre and half-extent, NOT two edges. By region depth the half-extent is about 2^-54 galaxy
       // units, so both edges round to the same double and their difference is exactly zero -- which is
-      // how the starfield ended up with a lattice level of 1001 and hung the tab.
+      // how the sky ended up with a detail level of 1001 and hung the tab.
       const halfW = ((view.w / 2) / pxPerUnit(cam)) * 2 ** -cam.k * unitScale;
       const halfH = ((view.h / 2) / pxPerUnit(cam)) * 2 ** -cam.k * unitScale;
       return { id: node.id, nx, ny, halfW, halfH };
@@ -535,7 +547,7 @@ function galaxyViewport(
  * Daylight, once the enclosing planet is larger than the screen.
  *
  * Above this the planet is a body in space and its own disc is the picture. Below it you are inside the
- * atmosphere, and what fills the frame is sky -- so the galaxy's starfield, correct out in the void, has
+ * atmosphere, and what fills the frame is sky -- so the galaxy's own glow, correct out in the void, has
  * to go. It fades in over the same range the planet's disc fades out, which is also the range over which
  * regions become the map.
  *
@@ -643,15 +655,35 @@ function drawLabel(frame: Frame, node: Node, sx: number, sy: number, rPx: number
 }
 
 /** Topmost object under a screen point, from the list the renderer just built. */
+/**
+ * What is under a screen point: the DEEPEST thing whose grab radius contains it, and among equals the
+ * NEAREST.
+ *
+ * Both halves matter. Deepest first, because a building inside a settlement is the more specific answer to
+ * "what is this". Nearest among equals, because the grab radius is 15 px and small things pack much closer
+ * than that -- this used to walk the list backwards and return the first match, so with a hundred galaxies
+ * four pixels across, pointing at one of them returned whichever neighbour happened to be drawn later.
+ * Aiming at a thing has to get you that thing.
+ */
 export function hitTest(hits: readonly HitEntry[], sx: number, sy: number): HitEntry | null {
-  for (let i = hits.length - 1; i >= 0; i--) {
+  let best: HitEntry | null = null;
+  let bestDepth = -1;
+  let bestDist = Infinity;
+  for (let i = 0; i < hits.length; i++) {
     const h = hits[i]!;
     const grab = Math.max(h.rPx, HIT_GRAB_PX);
     const dx = sx - h.xPx;
     const dy = sy - h.yPx;
-    if (dx * dx + dy * dy <= grab * grab) return h;
+    const d2 = dx * dx + dy * dy;
+    if (d2 > grab * grab) continue;
+    const depth = h.path.length;
+    if (depth < bestDepth) continue;
+    if (depth === bestDepth && d2 >= bestDist) continue;
+    best = h;
+    bestDepth = depth;
+    bestDist = d2;
   }
-  return null;
+  return best;
 }
 
 export { frameToNode };
@@ -751,7 +783,10 @@ export function scatterHitAt(
 
   const trueRPx = ref.rel * nodeScale * r;
   const drawn = systemStarRadius(ref.id, trueRPx, nodeScale * r);
-  const grab = Math.max(drawn, grabPx);
+  // The whole GLYPH is the target, not just the core: a star is drawn with a halo and, past a threshold,
+  // a four-point sparkle spanning several times the core radius, and clicking the part of a star you can
+  // plainly see has to hit it. `starGlyphRadius` is the extent the painter actually covers.
+  const grab = Math.max(starGlyphRadius(drawn), grabPx);
   // Compare in pixels, so the grab radius means the same thing at every depth.
   const dxPx = (nx - ref.ox) * nodeScale * r;
   const dyPx = (ny - ref.oy) * nodeScale * r;

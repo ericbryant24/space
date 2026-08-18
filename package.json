@@ -11,7 +11,8 @@
     "test": "node --test \"test/**/*.test.ts\"",
     "shots": "node tools/shots.ts",
     "perf": "node tools/perf.ts",
-    "nav": "node tools/nav-check.ts"
+    "nav": "node tools/nav-check.ts",
+    "real": "node tools/real-check.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

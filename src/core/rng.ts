@@ -27,7 +27,7 @@ const SEED = 0x9e3779b9;
 
 /**
  * Variadic hash. Convenient, but the rest parameter allocates an array on EVERY call, and these are
- * called tens of thousands of times per frame by the noise and starfield code. Use the fixed-arity
+ * called tens of thousands of times per frame by the noise and placement code. Use the fixed-arity
  * forms below in any hot path; a periodic 213 ms garbage-collection pause traced back to exactly this.
  */
 export function hash(...values: number[]): number {

@@ -47,8 +47,8 @@ export function drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, 
   const r = Math.max(0.8, systemRadiusPx * 0.055 * light.cls.discScale);
 
   // The second and last sanctioned gradient in the project: a star's bloom.
-  // A tighter bloom. An expansive one turns interplanetary space into warm haze and hides the
-  // starfield that should be visible right through it.
+  // A tighter bloom. An expansive one turns interplanetary space into warm haze and hides the galaxy
+  // that should be visible right through it.
   const bloom = r * (2.2 + light.cls.rel * 1.4);
   const g = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, bloom);
   g.addColorStop(0, css(light.colour, 0.34 * light.cls.rel));
@@ -113,9 +113,24 @@ const SYMBOL_MIN = 1.5;
  * The cap is PER CLASS, not global. A single ceiling makes every star identical the moment the brightest
  * reach it, and a field of same-sized dots stops reading as a sky -- magnitude is most of what makes a
  * star chart legible.
+ *
+ * The ceiling is what actually governs how crowded the busiest view gets, because a few doublings past
+ * galaxy focus every star has reached it while several hundred are still on screen. At 13 px that view
+ * was overlapping confetti covering nearly forty percent of the screen; at 8 px it reads as a dense
+ * cluster, which is what it is.
  */
 function symbolCap(rel: number): number {
-  return 4 + 9 * rel;
+  return 2.6 + 5.4 * rel;
+}
+
+/**
+ * How far a drawn star reaches, counting its halo and its sparkle -- the extent hit-testing has to cover,
+ * because clicking a part of a star you can plainly see has to hit that star.
+ */
+export function starGlyphRadius(coreRadiusPx: number): number {
+  if (coreRadiusPx >= SPARKLE_MIN_PX) return coreRadiusPx * SPARKLE_SCALE;
+  if (coreRadiusPx >= HALO_MIN_PX) return coreRadiusPx * HALO_SCALE;
+  return coreRadiusPx;
 }
 
 // One-entry memo: every star in a frame shares its parent's radius, and so does every hit test against
@@ -138,7 +153,7 @@ export function systemStarRadius(id: number, truePx: number, parentPx: number): 
 //
 // A galaxy puts a couple of thousand catalogued stars on screen at once. Drawn one at a time each needs
 // its own `fillStyle` assignment and its own path, and that state churn costs far more than the fills
-// themselves -- the identical pattern in the decorative starfield produced a periodic 210 ms stall.
+// themselves -- the identical pattern in the since-deleted decorative starfield produced a 210 ms stall.
 // Stars are therefore queued by spectral class and emitted as ONE PATH PER CLASS: a dozen fills instead
 // of two thousand, for a result that is pixel-for-pixel the same.
 
@@ -154,8 +169,12 @@ const SQUARE_MAX_PX = 2.6;
  * the house style: a big flat circle with no halo reads as confetti, which is exactly how a screenful
  * of capped-size stars looked before these existed.
  */
-const HALO_MIN_PX = 3.2;
-const SPARKLE_MIN_PX = 5.5;
+const HALO_MIN_PX = 2.9;
+/** Halo radius, as a multiple of the core radius. */
+const HALO_SCALE = 1.75;
+/** Sparkle spike length, as a multiple of the core radius. */
+const SPARKLE_SCALE = 2.7;
+const SPARKLE_MIN_PX = 4.6;
 /** Sparkles are four extra path segments each, so they are rationed to the brightest on screen. */
 const SPARKLE_CAP = 220;
 
@@ -220,8 +239,8 @@ export function flushStarBatch(ctx: CanvasRenderingContext2D, alpha: number): nu
     for (let i = 0; i < n; i++) {
       const r = rs[i]!;
       if (r < HALO_MIN_PX) continue;
-      ctx.moveTo(xs[i]! + r * 2.0, ys[i]!);
-      ctx.arc(xs[i]!, ys[i]!, r * 2.0, 0, Math.PI * 2);
+      ctx.moveTo(xs[i]! + r * HALO_SCALE, ys[i]!);
+      ctx.arc(xs[i]!, ys[i]!, r * HALO_SCALE, 0, Math.PI * 2);
       haloes++;
     }
     if (haloes > 0) {
@@ -239,7 +258,7 @@ export function flushStarBatch(ctx: CanvasRenderingContext2D, alpha: number): nu
       if (r < SPARKLE_MIN_PX) continue;
       const x = xs[i]!;
       const y = ys[i]!;
-      const long = r * 3.1;
+      const long = r * SPARKLE_SCALE;
       const wide = r * 0.42;
       ctx.moveTo(x - long, y);
       ctx.lineTo(x, y - wide);
