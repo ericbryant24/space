@@ -14,6 +14,11 @@ concurrency:
   group: pages
   cancel-in-progress: true
 
+env:
+  # Playwright is a devDependency used only by the local screenshot, perf and navigation harnesses.
+  # Its postinstall would pull ~100 MB of browsers into a job that never opens one.
+  PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD: '1'
+
 jobs:
   deploy:
     runs-on: ubuntu-latest
@@ -25,7 +30,8 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: lts/*
+          # Needs >= 22.18 for built-in TypeScript type stripping, which the test suite runs under.
+          node-version: '22'
           cache: npm
 
       - run: npm ci
