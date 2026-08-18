@@ -44,6 +44,8 @@ const main = async () => {
   const page = await browser.newPage({ viewport: { width: 1440, height: 900 }, deviceScaleFactor: 1 });
   await page.goto(BASE, { waitUntil: 'load' });
   await page.waitForFunction('window.__renderOnce !== undefined', null, { timeout: 15000 });
+  // Freeze ambient motion: orbits ticking mid-capture would make every run differ.
+  await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
 
   const rows: { kind: string; settle: number; p50: number; p99: number; max: number; draws: number }[] = [];
   const seen = new Set<string>();

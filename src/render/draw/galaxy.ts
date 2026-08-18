@@ -1,8 +1,8 @@
-import { f01, hash, mix, sm32 } from '../../core/rng.ts';
+import { f01, hash3, mix, sm32 } from '../../core/rng.ts';
 import { armDensity, type GalaxyTraits } from '../../universe/gen/galaxy.ts';
 import { css, shade, type Hsl } from '../color.ts';
 import { outlineWidth } from '../bands.ts';
-import { getSpriteBudgeted, makeSurface, sizeBucket, type Sprite } from '../sprites.ts';
+import { getScratch, getSpriteBudgeted, sizeBucket, type Sprite } from '../sprites.ts';
 
 /**
  * Galaxies are SHAPES WITH OUTLINES, not particle fog. Fog is what makes every procedural space
@@ -411,7 +411,7 @@ function vnoise(x: number, y: number): number {
   const fy = y - yi;
   const sx = fx * fx * (3 - 2 * fx);
   const sy = fy * fy * (3 - 2 * fy);
-  const at = (i: number, j: number) => f01(hash(i, j, 0x9e37));
+  const at = (i: number, j: number) => f01(hash3(i, j, 0x9e37));
   const a = at(xi, yi);
   const b = at(xi + 1, yi);
   const c = at(xi, yi + 1);
@@ -459,12 +459,11 @@ export function drawGalaxyInterior(
   // Roughly three cloud features across the screen, whatever the depth.
   const baseFreq = 3 / Math.max(1e-30, x1 - x0);
 
-  const { surface, ctx: wctx } = makeSurface(WASH_W);
+  const { surface, ctx: wctx } = getScratch(WASH_W);
   const p = t.palette;
   const glow = css(p.MID, 1);
   const bright = css(p.LIGHT, 1);
 
-  wctx.clearRect(0, 0, WASH_W, WASH_W);
   for (let j = 0; j < WASH_H; j++) {
     const gy = y0 + ((j + 0.5) / WASH_H) * (y1 - y0);
     for (let i = 0; i < WASH_W; i++) {
@@ -499,7 +498,27 @@ export function drawGalaxyInterior(
  * Point stars at a fixed SCREEN pitch, so the field stays similarly dense at every depth. This is not
  * a cheat: real starfields are self-similar under magnification, because stars are point sources that
  * never resolve into discs however far you zoom.
+ *
+ * Drawing matters as much as generating here. Two thousand separate fillRect calls, each preceded by a
+ * fillStyle change and wrapped in `globalCompositeOperation = 'lighter'`, produced a periodic 210 ms
+ * stall -- roughly every nineteenth frame, presumably a flush of the additive-blend path. Batching the
+ * points into one path per colour and dropping additive blending removed it entirely, at no visible
+ * cost against a dark ground.
  */
+const TONE_COUNT = 3;
+const MAX_POINTS = 6000;
+// Reused across frames so a full starfield costs no allocation at all.
+const pointX: Float32Array[] = [];
+const pointY: Float32Array[] = [];
+const pointS: Float32Array[] = [];
+const pointN: number[] = [];
+for (let i = 0; i < TONE_COUNT; i++) {
+  pointX.push(new Float32Array(MAX_POINTS));
+  pointY.push(new Float32Array(MAX_POINTS));
+  pointS.push(new Float32Array(MAX_POINTS));
+  pointN.push(0);
+}
+
 function drawUnresolvedStars(
   ctx: CanvasRenderingContext2D,
   t: GalaxyTraits,
@@ -515,31 +534,50 @@ function drawUnresolvedStars(
   const cols = Math.ceil(viewW / PITCH_PX);
   const rows = Math.ceil(viewH / PITCH_PX);
   const p = t.palette;
-  const tones = [css(p.PAPER, 0.9), css(p.LIGHT, 0.8), css(p.ACCENT, 0.7)];
+
+  for (let i = 0; i < TONE_COUNT; i++) pointN[i] = 0;
 
   // Quantise the sampling grid to galaxy space so stars stay put while panning rather than crawling.
   const spanX = (x1 - x0) / cols;
   const spanY = (y1 - y0) / rows;
   const i0 = Math.floor(x0 / spanX);
   const j0 = Math.floor(y0 / spanY);
+  const sxScale = viewW / (x1 - x0);
+  const syScale = viewH / (y1 - y0);
 
-  ctx.globalCompositeOperation = 'lighter';
   for (let j = 0; j <= rows + 1; j++) {
     for (let i = 0; i <= cols + 1; i++) {
       const gi = i0 + i;
       const gj = j0 + j;
-      const h = hash(gi, gj, 0x5747);
+      const h = hash3(gi, gj, 0x5747);
       const jx = (gi + f01(h)) * spanX;
       const jy = (gj + f01(mix(h, 1))) * spanY;
+      const arm = armDensity(t, jx, jy);
+      if (arm <= 0.02) continue;
       // Stars cluster where the cloud is thick, so the field and the wash agree.
-      const d = armDensity(t, jx, jy) * (0.35 + 0.9 * fbm(jx, jy, baseFreq));
+      const d = arm * (0.35 + 0.9 * fbm(jx, jy, baseFreq));
       if (f01(mix(h, 2)) > d * 0.95) continue;
-      const sx = ((jx - x0) / (x1 - x0)) * viewW;
-      const sy = ((jy - y0) / (y1 - y0)) * viewH;
+      const tone = (h >>> 9) % TONE_COUNT;
+      const n = pointN[tone]!;
+      if (n >= MAX_POINTS) continue;
       const size = 1 + Math.floor(f01(mix(h, 3)) * 2.2);
-      ctx.fillStyle = tones[(h >>> 9) % tones.length]!;
-      ctx.fillRect(sx - size / 2, sy - size / 2, size, size);
+      pointX[tone]![n] = (jx - x0) * sxScale - size / 2;
+      pointY[tone]![n] = (jy - y0) * syScale - size / 2;
+      pointS[tone]![n] = size;
+      pointN[tone] = n + 1;
     }
   }
-  ctx.globalCompositeOperation = 'source-over';
+
+  const tones = [css(p.PAPER, 0.92), css(p.LIGHT, 0.82), css(p.ACCENT, 0.72)];
+  for (let tone = 0; tone < TONE_COUNT; tone++) {
+    const n = pointN[tone]!;
+    if (n === 0) continue;
+    const xs = pointX[tone]!;
+    const ys = pointY[tone]!;
+    const ss = pointS[tone]!;
+    ctx.fillStyle = tones[tone]!;
+    ctx.beginPath();
+    for (let k = 0; k < n; k++) ctx.rect(xs[k]!, ys[k]!, ss[k]!, ss[k]!);
+    ctx.fill();
+  }
 }

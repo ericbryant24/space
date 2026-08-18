@@ -1,10 +1,11 @@
 import { createCamera, frameToNode, nodeToFrame, type View } from './camera/camera.ts';
 import { planFlight, stepFlight, type Flight } from './camera/flyto.ts';
 import { ascend, updateFocus } from './camera/rebase.ts';
+import { setSimTime } from './core/clock.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, stepInput } from './input/pointer.ts';
 import { hitTest, render, type HitEntry } from './render/renderer.ts';
-import { anchorCellAt, childAt, type Cell } from './universe/node.ts';
+import { childNear, childrenNear } from './universe/node.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
 import { createHud } from './ui/hud.ts';
@@ -94,7 +95,15 @@ function resize(): void {
   loop.wake();
 }
 
+/**
+ * Ambient motion is driven by a wall clock rather than accumulated frame deltas, so a paused or
+ * throttled tab resumes where the universe actually is instead of where it left off.
+ */
+const EPOCH = Date.now();
+let motion = true;
+
 const loop = startLoop((dt) => {
+  if (motion) setSimTime((Date.now() - EPOCH) / 1000);
   let moving = false;
 
   if (flight) {
@@ -128,8 +137,8 @@ const loop = startLoop((dt) => {
   hud.update(cam, stats, loop.fps, loop.frameMs);
   lastHits = stats.hits;
   (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
-  // Keep running while sprites are still resolving, otherwise the view would sleep half-baked.
-  return moving || stats.spritesPending;
+  // Ambient motion keeps the loop awake; without it the view would freeze mid-orbit when idle.
+  return moving || stats.spritesPending || motion;
 });
 
 attachInput(canvas, cam, input, () => view, () => loop.wake());
@@ -159,23 +168,11 @@ function flyToDepth(depth: number): void {
 /** Cycle through the children of the focus node, flying to each. Also the accessibility story. */
 let tabIndex = 0;
 function tabToChild(backwards: boolean): void {
-  const level = LEVELS[cam.node.kind];
-  if (!level.child) return;
   const [nx, ny] = frameToNode(cam, cam.fx, cam.fy);
-  const here = anchorCellAt(cam.node, nx, ny);
-  const found: Cell[] = [];
-  for (let ring = 0; ring <= 4 && found.length < 24; ring++) {
-    for (let dx = -ring; dx <= ring; dx++) {
-      for (let dy = -ring; dy <= ring; dy++) {
-        if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
-        const cell = { cx: here.cx + dx, cy: here.cy + dy };
-        if (childAt(cam.node, cell)) found.push(cell);
-      }
-    }
-  }
+  const found = childrenNear(cam.node, nx, ny);
   if (found.length === 0) return;
   tabIndex = (tabIndex + (backwards ? -1 : 1) + found.length) % found.length;
-  const planned = planFlight(cam, tree, [...cam.node.path, found[tabIndex]!], view);
+  const planned = planFlight(cam, tree, [...cam.node.path, found[tabIndex]!.cell], view);
   if (planned) {
     flight = planned;
     flightFromHistory = false;
@@ -222,6 +219,9 @@ window.addEventListener('keydown', (e) => {
     case 'Tab':
       tabToChild(e.shiftKey);
       break;
+    case ' ':
+      motion = !motion;
+      break;
     case 'Home':
       flight = null;
       applyState({ path: [], k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z: ROOT_Z });
@@ -265,6 +265,14 @@ function nudge(dx: number, dy: number): void {
   input.velY = dy * 0.25;
 }
 
+// Respect a stated preference for less movement: orbits and clouds hold still.
+const reduceMotion = window.matchMedia?.('(prefers-reduced-motion: reduce)');
+if (reduceMotion?.matches) motion = false;
+reduceMotion?.addEventListener?.('change', (e) => {
+  motion = !e.matches;
+  loop.wake();
+});
+
 window.addEventListener('resize', resize);
 resize();
 updateFocus(cam, tree, view);
@@ -276,22 +284,7 @@ updateFocus(cam, tree, view);
 function diveStep(dz = 0.5): void {
   flight = null;
   const [nx, ny] = frameToNode(cam, cam.fx, cam.fy);
-  let ref = childAt(cam.node, anchorCellAt(cam.node, nx, ny));
-  if (!ref) {
-    const here = anchorCellAt(cam.node, nx, ny);
-    outer: for (let ring = 1; ring <= 6; ring++) {
-      for (let dx = -ring; dx <= ring; dx++) {
-        for (let dy = -ring; dy <= ring; dy++) {
-          if (Math.max(Math.abs(dx), Math.abs(dy)) !== ring) continue;
-          const cand = childAt(cam.node, { cx: here.cx + dx, cy: here.cy + dy });
-          if (cand) {
-            ref = cand;
-            break outer;
-          }
-        }
-      }
-    }
-  }
+  const ref = childNear(cam.node, nx, ny);
   if (ref) {
     const [fx, fy] = nodeToFrame(cam, ref.ox, ref.oy);
     cam.fx = fx;
@@ -309,6 +302,12 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __loop: loop,
   __input: input,
   __diveStep: diveStep,
+  /** Freeze the clock at a fixed instant so screenshots and perf runs are reproducible. */
+  __freezeTime: (seconds: number): void => {
+    motion = false;
+    setSimTime(seconds);
+    loop.wake();
+  },
   /** What the last frame considered clickable, for the end-to-end navigation check. */
   /** Diagnostic for the navigation check: what a click at this point would resolve to. */
   __probeClick: (x: number, y: number) => {

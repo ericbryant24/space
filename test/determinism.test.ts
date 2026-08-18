@@ -1,7 +1,7 @@
 import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
-import { f01, hash, roll, sm32, stream } from '../src/core/rng.ts';
+import { f01, hash, hash1, hash2, hash3, hash4, roll, sm32, stream } from '../src/core/rng.ts';
 import { anchorCellAt, childAt, makeChild, rootNode, type Cell, type Node } from '../src/universe/node.ts';
 import { LEVELS, anchorLevel } from '../src/universe/schema.ts';
 import { Tree } from '../src/universe/tree.ts';
@@ -20,6 +20,21 @@ test('hash primitives match their locked golden values', () => {
   assert.equal(roll(12345, 'biome', 7), 3898721144);
   assert.equal(f01(hash(9)), 0.6928821802139282);
   assert.equal(rootNode(0).id, 1047088092);
+});
+
+test('the allocation-free hash variants are bit-identical to the variadic one', () => {
+  // The fixed-arity forms exist purely to avoid the rest-parameter array allocation, which caused a
+  // periodic 213 ms GC pause. If they ever diverge from hash(), the universe silently moves.
+  for (let i = 0; i < 500; i++) {
+    const a = i * 2654435761;
+    const b = ~i * 40503;
+    const c = i ^ 0x5bf03635;
+    const d = (i << 7) | 1;
+    assert.equal(hash1(a), hash(a), `hash1 diverged at ${i}`);
+    assert.equal(hash2(a, b), hash(a, b), `hash2 diverged at ${i}`);
+    assert.equal(hash3(a, b, c), hash(a, b, c), `hash3 diverged at ${i}`);
+    assert.equal(hash4(a, b, c, d), hash(a, b, c, d), `hash4 diverged at ${i}`);
+  }
 });
 
 test('the first child of the root is exactly where it has always been', () => {

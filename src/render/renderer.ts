@@ -1,6 +1,6 @@
 import { frameToNode, nodeToFrame, pxPerUnit, type Camera, type View } from '../camera/camera.ts';
 import { catalogName } from '../cosmic/catalog.ts';
-import { childAt, makeChild, type Cell, type Node } from '../universe/node.ts';
+import { childAt, makeChild, orbitCount, orbitRadius, orbitalChildren, type Cell, type Node } from '../universe/node.ts';
 import { galaxyTraits, type GalaxyTraits } from '../universe/gen/galaxy.ts';
 import { LEVELS, anchorLevel, type Kind } from '../universe/schema.ts';
 import type { Tree } from '../universe/tree.ts';
@@ -9,6 +9,8 @@ import { beginSpriteFrame, spritesPending } from './sprites.ts';
 import { cosmicPaletteOf, css, voidBackgroundFor } from './palettes.ts';
 import { drawGalaxyInterior, drawGalaxyLive, drawGalaxySprite, drawGalaxyStandIn } from './draw/galaxy.ts';
 import { drawContainer, drawStar } from './draw/containers.ts';
+import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon } from './draw/planet.ts';
+import { planetTraits, type PlanetTraits } from '../universe/gen/planet.ts';
 
 /** Objects smaller than this are not drawn at all; later their light folds into a baked wash tile. */
 const MIN_DRAW_PX = 0.45;
@@ -36,6 +38,18 @@ const HIT_MIN_PX = 2.5;
  * deepest thing under the cursor still wins.
  */
 const HIT_GRAB_PX = 10;
+
+/**
+ * Minimum on-screen size for a child of a given kind to be worth drawing at all.
+ *
+ * The global 1.1 px floor is right for stars and galaxies, which read fine as points. It is wrong for
+ * a region: two thousand regions scattered over a planet's face as pinpricks read as dirt on the lens,
+ * not as geography. A region only means anything once it is an area.
+ */
+const MIN_CHILD_PX_BY_KIND: Partial<Record<Kind, number>> = {
+  region: 20,
+  settlement: 6,
+};
 
 export interface HitEntry {
   path: readonly Cell[];
@@ -78,6 +92,8 @@ interface Frame {
   r: number;
   diagonal: number;
   detailBias: number;
+  /** Radius the last painter actually drew, which may exceed the true size for schematic bodies. */
+  lastDrawnRadius: number;
   stats: RenderStats;
 }
 
@@ -100,7 +116,7 @@ export function render(
   };
   beginSpriteFrame();
   const diagonal = Math.hypot(view.w, view.h);
-  const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, stats };
+  const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, lastDrawnRadius: 0, stats };
 
   ctx.fillStyle = css(voidBackgroundFor(cam.node, tree));
   ctx.fillRect(0, 0, view.w, view.h);
@@ -144,9 +160,23 @@ export function render(
   return stats;
 }
 
-function paint(frame: Frame, node: Node, cxF: number, cyF: number, scale: number, depth: number): void {
+/**
+ * `schematic` marks a body drawn at a floor size rather than its true size -- an orbital diagram, where
+ * a planet is genuinely a ten-thousandth of a pixel. Without threading it through, the minimum-size
+ * cull discards the very thing a system view exists to show.
+ */
+function paint(
+  frame: Frame,
+  node: Node,
+  cxF: number,
+  cyF: number,
+  scale: number,
+  depth: number,
+  schematic = false,
+): void {
   const { ctx, cam, view, r, stats } = frame;
-  const rPx = scale * r;
+  const trueRPx = scale * r;
+  const rPx = schematic ? Math.max(trueRPx, PLANET_ICON_MIN_PX) : trueRPx;
   if (rPx < MIN_DRAW_PX) return;
   if (stats.draws >= DRAW_BUDGET) {
     stats.budgetHit = true;
@@ -157,16 +187,22 @@ function paint(frame: Frame, node: Node, cxF: number, cyF: number, scale: number
   const sy = view.h / 2 + (cyF - cam.fy) * r;
   if (sx + rPx < 0 || sy + rPx < 0 || sx - rPx > view.w || sy - rPx > view.h) return;
 
-  const selfVisible = rPx <= MAX_SELF_DRAW_DIAGONALS * frame.diagonal;
+  // A planet keeps drawing its surface however large it gets, because its regions do not appear until
+  // they are big enough to be areas. Dropping the disc at the usual size limit left a stretch of bare
+  // starfield between "planet fills the screen" and "regions become the map".
+  const selfVisible = node.kind === 'planet' || rPx <= MAX_SELF_DRAW_DIAGONALS * frame.diagonal;
   if (selfVisible) {
+    frame.lastDrawnRadius = rPx;
     drawDisc(frame, node, sx, sy, rPx);
     stats.draws++;
 
-    if (rPx >= HIT_MIN_PX && stats.hits.length < 600) {
-      stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx });
+    // Use the radius actually drawn, so a schematic planet is as clickable as it looks.
+    const hitR = frame.lastDrawnRadius;
+    if (hitR >= HIT_MIN_PX && stats.hits.length < 600) {
+      stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR });
     }
-    if (rPx >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
-      drawLabel(ctx, node, sx, sy, rPx);
+    if (hitR >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
+      drawLabel(ctx, node, sx, sy, hitR);
       stats.labels++;
     }
   }
@@ -174,10 +210,21 @@ function paint(frame: Frame, node: Node, cxF: number, cyF: number, scale: number
   const level = LEVELS[node.kind];
   if (!level.child || depth >= MAX_DEPTH) return;
 
+
   // Nominal child size decides whether iterating the anchor grid is worth anything at all. This is
   // what keeps traversal structurally bounded: at wide zooms we never touch the grid.
   const nominalRel = 2 ** (LEVELS[level.child].logSpan - node.logSpan);
-  if (nominalRel * scale * r < MIN_CHILD_PX) return;
+  const childFloor = MIN_CHILD_PX_BY_KIND[level.child] ?? MIN_CHILD_PX;
+  // Orbital bodies are drawn at a schematic floor size, so the true-size gate would hide the very
+  // thing a system view exists to show.
+  if (level.placement !== 'orbits' && nominalRel * scale * r < childFloor) return;
+
+  if (level.placement === 'orbits') {
+    for (const ref of orbitalChildren(node)) {
+      paint(frame, makeChild(node, ref), cxF + ref.ox * scale, cyF + ref.oy * scale, ref.rel * scale, depth + 1, true);
+    }
+    return;
+  }
 
   const k = anchorLevel(node.kind);
   const n = 2 ** k;
@@ -233,7 +280,9 @@ function paint(frame: Frame, node: Node, cxF: number, cyF: number, scale: number
 const CONTAINER: Partial<Record<Kind, number>> = {
   field: 0.5,
   cluster: 0.85,
-  system: 0.7,
+  // Interplanetary space is empty and dark. A strong wash here turned every system into a warm haze
+  // and hid the starfield behind it, so a system gets little more than its boundary and its orbits.
+  system: 0.14,
   region: 1,
   settlement: 1,
 };
@@ -243,6 +292,17 @@ function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number)
 
   if (node.kind === 'galaxy') {
     drawGalaxy(frame, node, sx, sy, rPx);
+    return;
+  }
+
+  if (node.kind === 'planet') {
+    const parentId = frame.tree.parentOf(node)?.id ?? node.id;
+    const index = node.path[node.path.length - 1]?.cx ?? 0;
+    const count = Math.max(1, orbitCount(frame.tree.parentOf(node) ?? node));
+    const traits = planetTraitsCached(node.id, parentId, index, count);
+    // Returns the radius actually drawn, which may be the schematic floor rather than the true size.
+    const drawn = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
+    frame.lastDrawnRadius = drawn;
     return;
   }
 
@@ -258,8 +318,15 @@ function drawDisc(frame: Frame, node: Node, sx: number, sy: number, rPx: number)
       { h: style.hue + drift, s: style.sat / 100, l: style.light / 100 },
       containerStrength,
     );
-    // A system's content is its star, and the star is minute next to the system's own extent.
-    if (node.kind === 'system') drawStar(ctx, sx, sy, rPx, node.id);
+    if (node.kind === 'system') {
+      // Rings first, so bodies sit on top of their own orbits.
+      const palette = cosmicPaletteOf(node.id);
+      for (let i = 0; i < orbitCount(node); i++) {
+        drawOrbitRing(ctx, sx, sy, orbitRadius(i, orbitCount(node)) * rPx, palette.LIGHT);
+      }
+      // A system's content is its star, and the star is minute next to the system's own extent.
+      drawStar(ctx, sx, sy, rPx, node.id);
+    }
     return;
   }
 
@@ -355,6 +422,18 @@ function galaxyViewport(
     node = parent;
   }
   return null;
+}
+
+const planetCache = new Map<number, PlanetTraits>();
+
+function planetTraitsCached(id: number, systemId: number, index: number, count: number): PlanetTraits {
+  let t = planetCache.get(id);
+  if (!t) {
+    t = planetTraits(id, systemId, index, count);
+    if (planetCache.size > 512) planetCache.clear();
+    planetCache.set(id, t);
+  }
+  return t;
 }
 
 const traitCache = new Map<number, GalaxyTraits>();

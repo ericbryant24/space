@@ -12,10 +12,23 @@ export type Kind =
   | 'settlement'
   | 'building';
 
+/**
+ * How a level's children are positioned.
+ *
+ * `cells` anchors one child per cell of a binary subdivision grid. That is what makes a galaxy of a
+ * hundred billion stars navigable: "what is under the camera" becomes a floor division.
+ *
+ * `orbits` places a short, ordered list of children on circular orbits. A system has under ten
+ * planets, so it needs neither the grid nor the bounded-fanout guarantee -- and planets belong on
+ * orbits, which a grid cannot express.
+ */
+export type Placement = 'cells' | 'orbits';
+
 export interface Level {
   readonly kind: Kind;
   readonly logSpan: number;
   readonly child: Kind | null;
+  readonly placement: Placement;
   /** Fraction of anchor cells that hold a child. Below 1 the rest is honest void. */
   readonly density: number;
   /** Anchor cell half-size measured in child radii. Larger = sparser, more space between things. */
@@ -28,14 +41,14 @@ export interface Level {
 export const ROOT_KIND: Kind = 'field';
 
 export const LEVELS: Readonly<Record<Kind, Level>> = {
-  field: { kind: 'field', logSpan: 80, child: 'cluster', density: 0.62, spacing: 4, sizeJitter: 0.3, label: 'Field' },
-  cluster: { kind: 'cluster', logSpan: 75, child: 'galaxy', density: 0.55, spacing: 4, sizeJitter: 0.45, label: 'Cluster' },
-  galaxy: { kind: 'galaxy', logSpan: 69, child: 'system', density: 0.5, spacing: 4, sizeJitter: 0.35, label: 'Galaxy' },
-  system: { kind: 'system', logSpan: 40, child: 'planet', density: 0.5, spacing: 4, sizeJitter: 0.5, label: 'System' },
-  planet: { kind: 'planet', logSpan: 23, child: 'region', density: 0.7, spacing: 3, sizeJitter: 0.2, label: 'Planet' },
-  region: { kind: 'region', logSpan: 15, child: 'settlement', density: 0.45, spacing: 4, sizeJitter: 0.3, label: 'Region' },
-  settlement: { kind: 'settlement', logSpan: 10, child: 'building', density: 0.6, spacing: 3, sizeJitter: 0.35, label: 'Settlement' },
-  building: { kind: 'building', logSpan: 4, child: null, density: 0, spacing: 1, sizeJitter: 0, label: 'Building' },
+  field: { kind: 'field', placement: 'cells', logSpan: 80, child: 'cluster', density: 0.62, spacing: 4, sizeJitter: 0.3, label: 'Field' },
+  cluster: { kind: 'cluster', placement: 'cells', logSpan: 75, child: 'galaxy', density: 0.55, spacing: 4, sizeJitter: 0.45, label: 'Cluster' },
+  galaxy: { kind: 'galaxy', placement: 'cells', logSpan: 69, child: 'system', density: 0.5, spacing: 4, sizeJitter: 0.35, label: 'Galaxy' },
+  system: { kind: 'system', placement: 'orbits', logSpan: 40, child: 'planet', density: 0.5, spacing: 4, sizeJitter: 0.5, label: 'System' },
+  planet: { kind: 'planet', placement: 'cells', logSpan: 23, child: 'region', density: 0.7, spacing: 3, sizeJitter: 0.2, label: 'Planet' },
+  region: { kind: 'region', placement: 'cells', logSpan: 15, child: 'settlement', density: 0.45, spacing: 4, sizeJitter: 0.3, label: 'Region' },
+  settlement: { kind: 'settlement', placement: 'cells', logSpan: 10, child: 'building', density: 0.6, spacing: 3, sizeJitter: 0.35, label: 'Settlement' },
+  building: { kind: 'building', placement: 'cells', logSpan: 4, child: null, density: 0, spacing: 1, sizeJitter: 0, label: 'Building' },
 };
 
 export const KIND_ORDER: readonly Kind[] = [

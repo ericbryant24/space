@@ -47,9 +47,11 @@ export function drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, 
   const r = Math.max(0.8, systemRadiusPx * 0.055 * light.cls.discScale);
 
   // The second and last sanctioned gradient in the project: a star's bloom.
-  const bloom = r * (3.2 + light.cls.rel * 2.4);
+  // A tighter bloom. An expansive one turns interplanetary space into warm haze and hides the
+  // starfield that should be visible right through it.
+  const bloom = r * (2.2 + light.cls.rel * 1.4);
   const g = ctx.createRadialGradient(cx, cy, r * 0.5, cx, cy, bloom);
-  g.addColorStop(0, css(light.colour, 0.5 * light.cls.rel));
+  g.addColorStop(0, css(light.colour, 0.34 * light.cls.rel));
   g.addColorStop(1, css(light.colour, 0));
   ctx.fillStyle = g;
   ctx.beginPath();

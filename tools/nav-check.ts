@@ -68,6 +68,8 @@ const main = async () => {
 
   await page.goto(BASE, { waitUntil: 'load' });
   await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 15000 });
+  // Freeze ambient motion: orbits ticking mid-capture would make every run differ.
+  await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
 
   // 1. Dive deep, then check the URL tracks the camera.
   for (let i = 0; i < 90; i++) {

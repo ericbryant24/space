@@ -23,10 +23,32 @@ export function mix(h: number, v: number): number {
   return sm32((h ^ Math.imul(v | 0, 0x27d4eb2f)) | 0);
 }
 
+const SEED = 0x9e3779b9;
+
+/**
+ * Variadic hash. Convenient, but the rest parameter allocates an array on EVERY call, and these are
+ * called tens of thousands of times per frame by the noise and starfield code. Use the fixed-arity
+ * forms below in any hot path; a periodic 213 ms garbage-collection pause traced back to exactly this.
+ */
 export function hash(...values: number[]): number {
-  let h = 0x9e3779b9;
+  let h = SEED;
   for (let i = 0; i < values.length; i++) h = mix(h, values[i]!);
   return h;
+}
+
+// Allocation-free equivalents. These produce bit-identical results to hash() with the same arguments,
+// so swapping one in never moves the universe.
+export function hash1(a: number): number {
+  return mix(SEED, a);
+}
+export function hash2(a: number, b: number): number {
+  return mix(mix(SEED, a), b);
+}
+export function hash3(a: number, b: number, c: number): number {
+  return mix(mix(mix(SEED, a), b), c);
+}
+export function hash4(a: number, b: number, c: number, d: number): number {
+  return mix(mix(mix(mix(SEED, a), b), c), d);
 }
 
 /** uint32 -> [0, 1) using the top 24 bits. */
@@ -58,7 +80,7 @@ export const STREAM_VERSION: Readonly<Record<string, number>> = {};
 
 /** Seed for a named stream on a node. Stable across additions of unrelated streams. */
 export function stream(nodeId: number, name: string): number {
-  return hash(nodeId, fnv1a(name), STREAM_VERSION[name] ?? 0);
+  return hash3(nodeId, fnv1a(name), STREAM_VERSION[name] ?? 0);
 }
 
 /** One value from a named stream, indexed so a stream can yield a sequence without state. */

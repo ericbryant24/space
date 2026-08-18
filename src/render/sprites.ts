@@ -134,3 +134,19 @@ export function clearSprites(): void {
   usedBytes = 0;
   pending = 0;
 }
+
+/**
+ * A single reusable scratch surface. The galaxy interior wash is rebuilt every frame from the density
+ * field, and allocating a fresh canvas each time is both wasted work and a steady stream of garbage
+ * for the collector to trip over.
+ */
+let scratch: { surface: Surface; ctx: CanvasRenderingContext2D; size: number } | null = null;
+
+export function getScratch(size: number): { surface: Surface; ctx: CanvasRenderingContext2D } {
+  if (!scratch || scratch.size < size) {
+    const made = makeSurface(size);
+    scratch = { ...made, size };
+  }
+  scratch.ctx.clearRect(0, 0, scratch.size, scratch.size);
+  return scratch;
+}

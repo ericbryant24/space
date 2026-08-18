@@ -1,4 +1,4 @@
-import { anchorCellAt, childAt, makeChild, type ChildRef } from '../universe/node.ts';
+import { anchorCellAt, childAt, makeChild, orbitalChildren, type ChildRef } from '../universe/node.ts';
 import type { Tree } from '../universe/tree.ts';
 import { LEVELS } from '../universe/schema.ts';
 import {
@@ -85,11 +85,25 @@ export function ascend(cam: Camera, tree: Tree): boolean {
  * radius, so "what is under the camera" is a floor division rather than a search.
  */
 export function pickEnterableChild(cam: Camera, rEnter: number): ChildRef | null {
-  if (!LEVELS[cam.node.kind].child) return null;
+  const level = LEVELS[cam.node.kind];
+  if (!level.child) return null;
   const [nx, ny] = frameToNode(cam, cam.fx, cam.fy);
+  const scale = pxPerNodeUnit(cam);
+
+  if (level.placement === 'orbits') {
+    // At most nine bodies, so a scan is cheaper than any index would be.
+    for (const ref of orbitalChildren(cam.node)) {
+      if (ref.rel * scale < rEnter) continue;
+      const dx = nx - ref.ox;
+      const dy = ny - ref.oy;
+      if (dx * dx + dy * dy <= ref.rel * ref.rel) return ref;
+    }
+    return null;
+  }
+
   const ref = childAt(cam.node, anchorCellAt(cam.node, nx, ny));
   if (!ref) return null;
-  if (ref.rel * pxPerNodeUnit(cam) < rEnter) return null;
+  if (ref.rel * scale < rEnter) return null;
   const dx = nx - ref.ox;
   const dy = ny - ref.oy;
   if (dx * dx + dy * dy > ref.rel * ref.rel) return null;
