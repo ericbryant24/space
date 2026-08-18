@@ -96,6 +96,7 @@
     border: 1.5px solid rgba(242, 236, 221, 0.8);
     border-top: none;
   }
+  .hint b { color: #ffd166; font-weight: 700; }
   .hint {
     position: absolute;
     left: 50%;
@@ -115,11 +116,12 @@
   @media (max-width: 720px) {
     .hud { min-width: 0; font-size: 11px; }
     .hud .rows { display: none; }
-    .hint { font-size: 11.5px; }
+    .hint b { color: #ffd166; font-weight: 700; }
+  .hint { font-size: 11.5px; }
   }
 </style>
 <canvas id="view"></canvas>
 <div id="overlay">
-  <div class="hint">scroll to zoom &middot; drag to pan &middot; click to fly &middot; Tab to tour &middot; Backspace to rise &middot; Home to reset</div>
+  <div class="hint">scroll to zoom &middot; drag to pan &middot; <b>hover anything, then scroll or click to travel to it</b> &middot; Backspace to rise</div>
 </div>
 <script type="module" src="/src/main.ts"></script>

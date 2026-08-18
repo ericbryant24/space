@@ -11,11 +11,22 @@ export interface InputState {
   velX: number;
   velY: number;
   onClick: ((x: number, y: number) => void) | null;
+  /**
+   * Called on every zoom-in gesture. Lets navigation decide whether the cursor is over something worth
+   * travelling to, rather than zooming into the gap beside it.
+   */
+  onZoomIntent: ((x: number, y: number, dz: number) => boolean) | null;
+  /** Set by navigation to cancel an in-flight spring, e.g. when a gesture becomes a flight. */
+  cancelZoom(): void;
 }
 
 const ZOOM_STIFFNESS = 22;
-const WHEEL_SCALE = 0.0022;
-const MAX_WHEEL_STEP = 0.6;
+/**
+ * Doublings per pixel of wheel delta. At 0.0022 a notch was 0.22 doublings, so crossing the ladder took
+ * roughly 350 notches of scrolling -- which is most of why the zoom felt like hard work.
+ */
+const WHEEL_SCALE = 0.0048;
+const MAX_WHEEL_STEP = 0.9;
 const DRAG_DECAY = 0.92;
 
 export function createInput(cam: Camera): InputState {
@@ -29,6 +40,10 @@ export function createInput(cam: Camera): InputState {
     velX: 0,
     velY: 0,
     onClick: null,
+    onZoomIntent: null,
+    cancelZoom(): void {
+      this.zTarget = cam.z;
+    },
   };
 }
 
@@ -66,6 +81,12 @@ export function attachInput(
       // slide off the point the user aimed at.
       input.anchorX = p.x;
       input.anchorY = p.y;
+      // Navigation gets first refusal: if the cursor is over something far too small to zoom into by
+      // hand, it takes the gesture and flies there instead.
+      if (dz > 0 && input.onZoomIntent?.(p.x, p.y, dz)) {
+        wake();
+        return;
+      }
       input.zTarget += dz;
       wake();
     },

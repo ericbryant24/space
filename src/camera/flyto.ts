@@ -18,8 +18,13 @@ export interface Flight {
   readonly ax: number;
   readonly ay: number;
   readonly az: number;
-  readonly bx: number;
-  readonly by: number;
+  /**
+   * Destination, re-derived every step rather than snapshotted. A planet is orbiting, so a flight that
+   * aimed at where it was when the flight began arrived at empty space beside it and failed to enter.
+   * Re-targeting also looks better: the camera curves in to intercept.
+   */
+  bx: number;
+  by: number;
   readonly bz: number;
   /** Zoom to pull back to at the midpoint when the endpoints are far apart. */
   readonly zOut: number;
@@ -120,6 +125,16 @@ export function stepFlight(flight: Flight, cam: Camera, tree: Tree, view: View, 
 
   const lca = tree.resolve(flight.targetPath.slice(0, flight.depth));
   if (!lca) return true;
+
+  // Follow the target if it has moved since the flight was planned.
+  const target = tree.resolve(flight.targetPath);
+  if (target) {
+    const live = positionInAncestor(tree, target, 0, 0, flight.depth);
+    if (live) {
+      flight.bx = live.x;
+      flight.by = live.y;
+    }
+  }
 
   const x = flight.ax + (flight.bx - flight.ax) * e;
   const y = flight.ay + (flight.by - flight.ay) * e;

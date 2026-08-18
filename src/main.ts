@@ -1,10 +1,11 @@
 import { createCamera, frameToNode, nodeToFrame, type View } from './camera/camera.ts';
+import { R_ENTER } from './camera/rebase.ts';
 import { planFlight, stepFlight, type Flight } from './camera/flyto.ts';
 import { ascend, updateFocus } from './camera/rebase.ts';
 import { setSimTime } from './core/clock.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, stepInput } from './input/pointer.ts';
-import { hitTest, render, type HitEntry } from './render/renderer.ts';
+import { drawHover, hitTest, hoverLabel, render, type HitEntry } from './render/renderer.ts';
 import { childNear, childrenNear } from './universe/node.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
@@ -134,8 +135,21 @@ const loop = startLoop((dt) => {
 
   tree.beginFrame();
   const stats = render(ctx, cam, tree, view);
-  hud.update(cam, stats, loop.fps, loop.frameMs);
   lastHits = stats.hits;
+
+  // Reticle under the cursor, so it is visible that things can be travelled to at all.
+  if (!flight && !input.dragging) {
+    const hovered = hitTest(lastHits, input.hoverX, input.hoverY);
+    if (hovered && hovered.path.length > cam.node.path.length) {
+      const node = tree.resolve(hovered.path);
+      if (node) drawHover(ctx, hovered, hoverLabel(node, tree), performance.now() / 1000);
+      canvas.style.cursor = 'pointer';
+    } else {
+      canvas.style.cursor = 'crosshair';
+    }
+  }
+
+  hud.update(cam, stats, loop.fps, loop.frameMs);
   (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
   // Ambient motion keeps the loop awake; without it the view would freeze mid-orbit when idle.
   return moving || stats.spritesPending || motion;
@@ -146,12 +160,43 @@ attachInput(canvas, cam, input, () => view, () => loop.wake());
 input.onClick = (x, y) => {
   const hit = hitTest(lastHits, x, y);
   if (!hit) return;
+  travelTo(hit);
+};
+
+/**
+ * How far, in doublings, a thing is from being enterable at its true size.
+ *
+ * A planet in a system view is about 2^-17 of the system, so this is around 17 -- seventeen doublings of
+ * scrolling through empty interplanetary space, during which the planet is pinned at its schematic floor
+ * size and does not appear to get any closer. It also keeps orbiting, so it slides out from under the
+ * cursor. Hand-zooming that gap is not a thing anyone can do, which is why scrolling toward a small
+ * object becomes a flight instead.
+ */
+function doublingsAway(hit: HitEntry): number {
+  return Math.log2(R_ENTER / Math.max(1e-12, hit.trueRPx));
+}
+
+/** Distance, in doublings, beyond which a gesture becomes a flight rather than a manual zoom. */
+const FLY_THRESHOLD_DOUBLINGS = 4;
+
+function travelTo(hit: HitEntry): boolean {
   const planned = planFlight(cam, tree, hit.path, view);
-  if (planned) {
-    flight = planned;
-    flightFromHistory = false;
-    loop.wake();
-  }
+  if (!planned) return false;
+  flight = planned;
+  flightFromHistory = false;
+  input.cancelZoom();
+  loop.wake();
+  return true;
+}
+
+input.onZoomIntent = (x, y) => {
+  if (flight) return false;
+  const hit = hitTest(lastHits, x, y);
+  // Only take over for something deeper than where we already are, and only when hand-zooming to it
+  // would mean crossing a gap no one could cross by scrolling.
+  if (!hit || hit.path.length <= cam.node.path.length) return false;
+  if (doublingsAway(hit) <= FLY_THRESHOLD_DOUBLINGS) return false;
+  return travelTo(hit);
 };
 
 /** Fly to the ancestor at a given path depth. Used by the breadcrumb. */
@@ -207,13 +252,7 @@ window.addEventListener('keydown', (e) => {
     case 'Enter':
     case 'f': {
       const hit = hitTest(lastHits, input.hoverX, input.hoverY);
-      if (hit) {
-        const planned = planFlight(cam, tree, hit.path, view);
-        if (planned) {
-          flight = planned;
-          flightFromHistory = false;
-        }
-      }
+      if (hit) travelTo(hit);
       break;
     }
     case 'Tab':
@@ -328,6 +367,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
       x: h.xPx,
       y: h.yPx,
       r: h.rPx,
+      trueR: h.trueRPx,
     })),
   __renderOnce: (): number => {
     tree.beginFrame();

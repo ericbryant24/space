@@ -35,6 +35,17 @@ export interface View {
   h: number;
 }
 
+/**
+ * The bottom of the zoom.
+ *
+ * Nothing in the universe is smaller than a building (logSpan 4), so at z = 8 a building is about 4000
+ * px across and there is nothing further in. Without this clamp the wheel simply kept going: zooming
+ * into empty interplanetary space reached z = +56 -- fifty doublings past the smallest object that
+ * exists -- with the scale bar reading sub-atomic distances and nothing ever entering focus. The
+ * precision invariant held the whole time, which is exactly why it went unnoticed.
+ */
+export const Z_MAX = 8;
+
 export function createCamera(node: Node, z: number): Camera {
   return { node, k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z };
 }

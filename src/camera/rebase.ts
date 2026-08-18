@@ -2,6 +2,7 @@ import { anchorCellAt, childAt, makeChild, orbitalChildren, type ChildRef } from
 import type { Tree } from '../universe/tree.ts';
 import { LEVELS } from '../universe/schema.ts';
 import {
+  Z_MAX,
   frameToNode,
   pxPerNodeUnit,
   pxPerUnit,
@@ -118,6 +119,9 @@ export function pickEnterableChild(cam: Camera, rEnter: number): ChildRef | null
  * derived from R, which is continuous across every one of these operations.
  */
 export function updateFocus(cam: Camera, tree: Tree, _view: View): void {
+  // The bottom of the ladder. Symmetric with the root clamp below, which stops zoom-out.
+  if (cam.z > Z_MAX) cam.z = Z_MAX;
+
   for (let guard = 0; guard < 96; guard++) {
     const r = pxPerUnit(cam);
     if (r < R_ASCEND) {

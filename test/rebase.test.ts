@@ -2,6 +2,7 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import {
+  Z_MAX,
   createCamera,
   mantissaHeadroom,
   pxPerUnit,
@@ -180,6 +181,31 @@ test('crossing a threshold repeatedly does not thrash the focus stack', () => {
     prev = depth();
   }
   assert.equal(changes, 0, `focus depth oscillated ${changes} times inside the hysteresis band`);
+});
+
+test('the zoom has a bottom as well as a top', () => {
+  // Without this, scrolling into empty interplanetary space ran to z = +56 -- fifty doublings past the
+  // smallest object that exists -- with the scale bar reading sub-atomic distances and nothing ever
+  // coming into focus. The precision invariant held the whole time, which is why it went unnoticed.
+  const { tree, cam } = fresh();
+  updateFocus(cam, tree, VIEW);
+  for (let i = 0; i < 400; i++) {
+    zoomAt(cam, VIEW.w / 2 + 11, VIEW.h / 2 - 7, 1, VIEW);
+    updateFocus(cam, tree, VIEW);
+    assert.ok(cam.z <= Z_MAX + 1e-9, `z reached ${cam.z}, past the bottom of the ladder`);
+  }
+  assert.ok(Math.abs(cam.z - Z_MAX) < 1e-9, `expected to be parked at the floor, got ${cam.z}`);
+
+  // And the invariant must still hold while parked against it.
+  const r = pxPerUnit(cam);
+  assert.ok(r >= 64 - 1e-9 && r <= 1024 + 1e-9, `R = ${r} left the window at the zoom floor`);
+  assert.ok(mantissaHeadroom(cam) > 30, 'headroom collapsed at the zoom floor');
+});
+
+test('the zoom floor is deep enough to stand next to a building', () => {
+  // A building has logSpan 4, so at Z_MAX its radius in pixels is 2^(Z_MAX + 4).
+  const buildingRadiusPx = 2 ** (Z_MAX + LEVELS.building.logSpan);
+  assert.ok(buildingRadiusPx > 1500, `a building only reaches ${buildingRadiusPx.toFixed(0)} px at full zoom`);
 });
 
 function absoluteAtScreen(cam: Camera, tree: Tree, sx: number, sy: number): [number, number] {

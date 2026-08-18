@@ -152,9 +152,16 @@ export function orbitalChild(node: Node, index: number): ChildRef | null {
   const rel = 2 ** (logSpan - node.logSpan);
 
   const radius = orbitRadius(index, count);
-  // Kepler's third law, with the constant chosen so the innermost body takes about half a minute:
-  // fast enough to notice, slow enough not to look frantic.
-  const period = 24 * radius ** 1.5;
+  /**
+   * Kepler's third law. The constant was 24, which gave the innermost body an orbit of about four
+   * seconds -- roughly 200 px per second across a system view. At that speed a planet drawn as a
+   * four-pixel dot is under the cursor for a tenth of a second, so aiming at one was impossible and
+   * scrolling toward one never hit it. Ambient motion has to be slow enough to point at.
+   *
+   * At 360 the innermost orbit takes about ninety seconds and the outermost about six minutes: plainly
+   * moving if you watch for a few seconds, and steady enough to aim at.
+   */
+  const period = 360 * radius ** 1.5;
   const angle = f01(hash2(id, 0x07)) * Math.PI * 2 + (simTime() / period) * Math.PI * 2;
 
   return {

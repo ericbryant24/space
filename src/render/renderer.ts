@@ -33,12 +33,13 @@ const LABEL_MIN_PX = 26;
 /** Anything at least this big on screen becomes a click target. */
 const HIT_MIN_PX = 2.5;
 /**
- * Minimum click radius. A galaxy seen from its cluster is about four pixels across, so hit-testing
- * against the drawn radius would make it effectively unclickable. Enlarging the target does not create
- * ambiguity: the hit list is walked backwards, and children are recorded after their parents, so the
- * deepest thing under the cursor still wins.
+ * Minimum click radius. A galaxy seen from its cluster is about four pixels across, and a planet in a
+ * system view is drawn at a four-pixel floor, so hit-testing against the drawn radius would make both
+ * effectively unclickable -- and orbiting bodies are moving targets besides. Enlarging the target does
+ * not create ambiguity: the hit list is walked backwards, and children are recorded after their parents,
+ * so the deepest thing under the cursor still wins.
  */
-const HIT_GRAB_PX = 10;
+const HIT_GRAB_PX = 15;
 
 /**
  * Minimum on-screen size for a child of a given kind to be worth drawing at all.
@@ -57,7 +58,10 @@ export interface HitEntry {
   kind: Kind;
   xPx: number;
   yPx: number;
+  /** Radius as drawn, which for a schematic body is a floor rather than its real size. */
   rPx: number;
+  /** Radius at true scale. A planet in a system view is a ten-thousandth of a pixel. */
+  trueRPx: number;
 }
 
 export interface RenderStats {
@@ -200,7 +204,7 @@ function paint(
     // Use the radius actually drawn, so a schematic planet is as clickable as it looks.
     const hitR = frame.lastDrawnRadius;
     if (hitR >= HIT_MIN_PX && stats.hits.length < 600) {
-      stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR });
+      stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR, trueRPx });
     }
     if (hitR >= LABEL_MIN_PX && stats.labels < LABEL_BUDGET) {
       drawLabel(frame, node, sx, sy, hitR);
@@ -463,6 +467,23 @@ export function displayName(node: Node, tree: Tree): string {
   }
 }
 
+/**
+ * Richer label for the hover reticle. `displayName` alone gives an uninhabited planet its catalogue
+ * ordinal -- a bare "I" -- which tells the reader nothing about what they are pointing at.
+ */
+export function hoverLabel(node: Node, tree: Tree): string {
+  const name = displayName(node, tree);
+  if (node.kind === 'planet') {
+    const found = planetCultureFor(node, tree);
+    if (found && !found.culture.inhabited) return `${name} · ${found.traits.label}`;
+    if (found) return `${name} · ${found.traits.label}`;
+  }
+  if (node.kind === 'field' || node.kind === 'cluster' || node.kind === 'galaxy' || node.kind === 'system') {
+    return name;
+  }
+  return `${name} · ${LEVELS[node.kind].label.toLowerCase()}`;
+}
+
 function drawLabel(frame: Frame, node: Node, sx: number, sy: number, rPx: number): void {
   const { ctx } = frame;
   const text = displayName(node, frame.tree);
@@ -490,3 +511,67 @@ export function hitTest(hits: readonly HitEntry[], sx: number, sy: number): HitE
 }
 
 export { frameToNode };
+
+/**
+ * Ring and label under the cursor.
+ *
+ * Without it there is no way to tell that anything is a target: a planet in a system view is a four-pixel
+ * dot, and "click to fly" in the hint bar does not help if you cannot see what is clickable.
+ */
+export function drawHover(
+  ctx: CanvasRenderingContext2D,
+  hit: HitEntry,
+  name: string,
+  pulse: number,
+): void {
+  const r = Math.max(hit.rPx, 11) + 4 + Math.sin(pulse * 3.2) * 1.4;
+  ctx.save();
+  ctx.lineWidth = 1.6;
+  ctx.strokeStyle = 'rgba(255, 209, 102, 0.9)';
+  ctx.beginPath();
+  ctx.arc(hit.xPx, hit.yPx, r, 0, Math.PI * 2);
+  ctx.stroke();
+
+  // Four ticks rather than a solid second ring: it reads as a reticle, not as part of the object.
+  ctx.strokeStyle = 'rgba(255, 209, 102, 0.55)';
+  for (let i = 0; i < 4; i++) {
+    const a = (i / 4) * Math.PI * 2 + Math.PI / 4;
+    ctx.beginPath();
+    ctx.moveTo(hit.xPx + Math.cos(a) * (r + 3), hit.yPx + Math.sin(a) * (r + 3));
+    ctx.lineTo(hit.xPx + Math.cos(a) * (r + 8), hit.yPx + Math.sin(a) * (r + 8));
+    ctx.stroke();
+  }
+
+  const label = name;
+  ctx.font = '700 12.5px Nunito, ui-sans-serif, system-ui, sans-serif';
+  const w = ctx.measureText(label).width;
+  const bx = hit.xPx - w / 2 - 7;
+  const by = hit.yPx - r - 26;
+  ctx.fillStyle = 'rgba(10, 13, 24, 0.82)';
+  roundRect(ctx, bx, by, w + 14, 20, 10);
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(255, 209, 102, 0.35)';
+  ctx.lineWidth = 1;
+  roundRect(ctx, bx, by, w + 14, 20, 10);
+  ctx.stroke();
+  ctx.fillStyle = '#ffd166';
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+  ctx.fillText(label, hit.xPx, by + 10.5);
+  ctx.restore();
+}
+
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
+  const rr = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rr, y);
+  ctx.lineTo(x + w - rr, y);
+  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
+  ctx.lineTo(x + w, y + h - rr);
+  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
+  ctx.lineTo(x + rr, y + h);
+  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
+  ctx.lineTo(x, y + rr);
+  ctx.quadraticCurveTo(x, y, x + rr, y);
+  ctx.closePath();
+}

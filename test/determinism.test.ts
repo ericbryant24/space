@@ -2,7 +2,17 @@ import { strict as assert } from 'node:assert';
 import { test } from 'node:test';
 
 import { f01, hash, hash1, hash2, hash3, hash4, roll, sm32, stream } from '../src/core/rng.ts';
-import { anchorCellAt, childAt, makeChild, rootNode, type Cell, type Node } from '../src/universe/node.ts';
+import {
+  anchorCellAt,
+  childAt,
+  makeChild,
+  orbitCount,
+  orbitalChildren,
+  rootNode,
+  type Cell,
+  type Node,
+} from '../src/universe/node.ts';
+import { setSimTime } from '../src/core/clock.ts';
 import { LEVELS, anchorLevel } from '../src/universe/schema.ts';
 import { Tree } from '../src/universe/tree.ts';
 
@@ -225,6 +235,38 @@ test('anchorCellAt inverts the cell centre it names', () => {
     const centreY = -1 + (2 * cy + 1) * half;
     assert.deepEqual(anchorCellAt(node, centreX, centreY), { cx, cy });
   }
+});
+
+test('orbiting bodies are slow enough to point at', () => {
+  // The bug this guards is a usability one, and it made the whole viewer feel broken: at the original
+  // orbital constant the innermost planet crossed a system view at roughly 200 px/s, so a body drawn as
+  // a four-pixel dot sat under the cursor for about a tenth of a second. Aiming at one was impossible.
+  const tree = new Tree(0x51ace);
+  // A synthetic system node is enough: only its id and logSpan matter to the orbit maths.
+  const system: Node = { kind: 'system', id: 0x5157, logSpan: LEVELS.system.logSpan, path: [{ cx: 1, cy: 1 }] };
+  const count = orbitCount(system);
+  assert.ok(count > 0, 'need a system with planets to measure');
+
+  // A system framed at 256 px radius, which is how it appears when it is the focus.
+  const systemRadiusPx = 256;
+  let worstPxPerSecond = 0;
+  for (const step of [0, 1]) {
+    setSimTime(step);
+    const positions = orbitalChildren(system).map((r) => ({ x: r.ox, y: r.oy }));
+    if (step === 1) {
+      setSimTime(0);
+      const before = orbitalChildren(system).map((r) => ({ x: r.ox, y: r.oy }));
+      for (let i = 0; i < positions.length; i++) {
+        const d = Math.hypot(positions[i]!.x - before[i]!.x, positions[i]!.y - before[i]!.y);
+        worstPxPerSecond = Math.max(worstPxPerSecond, d * systemRadiusPx);
+      }
+    }
+  }
+  setSimTime(0);
+  console.log(`      fastest body crosses a framed system at ${worstPxPerSecond.toFixed(1)} px/s`);
+  assert.ok(worstPxPerSecond > 0.5, 'orbits should visibly move; ambient motion is the point');
+  assert.ok(worstPxPerSecond < 40, `${worstPxPerSecond.toFixed(1)} px/s is too fast to aim at`);
+  assert.ok(tree.root.kind === 'field');
 });
 
 test('every level except the last has somewhere to go', () => {
