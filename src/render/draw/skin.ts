@@ -1,6 +1,6 @@
 import { hash2, f01 } from '../../core/rng.ts';
 import { RELIEF } from '../../culture/terrain.ts';
-import { climateAt, type Biome } from '../../culture/climate.ts';
+import { climateAt, type Biome, type LocalClimate } from '../../culture/climate.ts';
 import { smoothstep } from '../bands.ts';
 import { atLuminance, hueDelta, luminanceOf, solveL, type Hsl } from '../color.ts';
 import type { PlanetTraits } from '../../universe/gen/planet.ts';
@@ -132,20 +132,25 @@ export function classifySkin(
     const theta = thetaAt(i);
     const radius = radiusAt(i);
     let m: Material;
+    // ONE climate query per sample. It costs a twelve-octave terrain evaluation, and this loop runs a few
+    // thousand times a frame across the plates on screen, so asking twice -- once for the temperature and again
+    // for the biome -- doubled the cost of the hottest thing in a surface view.
+    let local: LocalClimate | null = null;
     if (radius <= seaR) {
       m = 'bed';
     } else {
       const dTheta = i === 0 ? thetaAt(Math.min(n - 1, 1)) - theta : theta - prevTheta;
       const dR = i === 0 ? radiusAt(Math.min(n - 1, 1)) - radius : radius - prevRadius;
       const slope = Math.abs(dR / Math.max(1e-12, radius * dTheta));
-      if (climateAt(planetId, traits, theta).temp < SNOW_LINE_K) m = 'snow';
+      local = climateAt(planetId, traits, theta);
+      if (local.temp < SNOW_LINE_K) m = 'snow';
       else if (slope > SKIN_STEEP) m = 'rock';
       else if (radius - seaR < beachPlanet) m = 'sand';
       else m = 'soil';
     }
     // Only soil carries a biome into the picture; snow is white, rock is rock, and sand is ground-up rock.
     // Splitting the other materials on biome too would cut runs at boundaries that make no visible difference.
-    const biome: Biome = m === 'soil' ? climateAt(planetId, traits, theta).biome : currentBiome;
+    const biome: Biome = m === 'soil' && local ? local.biome : currentBiome;
     if (m !== current || (m === 'soil' && biome !== currentBiome)) {
       if (current !== null) out.push({ material: current, biome: currentBiome, from: start, to: i });
       current = m;
