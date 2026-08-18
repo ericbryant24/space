@@ -8,7 +8,7 @@ import { biosphereOf, describeBiosphere } from './culture/biosphere.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, flingBy, stepInput } from './input/pointer.ts';
 import { drawHover, drawLock, render, setRecordAllHits, type HitEntry } from './render/renderer.ts';
-import { pickAt, type PickResult } from './render/pick.ts';
+import { nearestRimAt, pickAt, type PickResult } from './render/pick.ts';
 import {
   childNear,
   childrenNear,
@@ -435,6 +435,13 @@ function travelTo(hit: PickResult): boolean {
  * "Squarely on" means within the thing's own drawn glyph, not the fifteen-pixel assist radius that makes
  * four-pixel dots clickable. Scroll over the gaps and nothing is taken over; the view zooms where it is
  * pointing already.
+ *
+ * A WORLD IS NOT A GAP. Its face is drawn as one disc and its rim slots are a pixel wide, so almost nowhere
+ * on it passes "squarely on" and, once the disc is wider than the viewport, nothing on the screen does at
+ * all -- which left a scroll at a planet with nothing to aim at, descending into the mantle until the ground
+ * clamp stopped it. So a point that is inside a body rather than beside it falls through to the ground under
+ * it: see `nearestRimAt`. Only the zoom does this; the reticle keeps the strict test, because a mark drawn a
+ * third of a screen from the cursor would be claiming something untrue about where the cursor is.
  */
 input.onZoomIntent = (x, y) => {
   if (flight) return;
@@ -445,6 +452,19 @@ input.onZoomIntent = (x, y) => {
     if (!tracked || !samePath(under.path, tracked)) {
       tracked = under.path;
       acquired = false;
+      return;
+    }
+  }
+
+  // Nothing squarely under the cursor, but the cursor is in rock: the ground on that bearing is where
+  // zooming in from here goes, and it is a real child rather than a direction to fall in.
+  if (!under) {
+    const ground = nearestRimAt(cam, tree, view, x, y);
+    if (ground && !isSelfOrAncestor(ground.path)) {
+      if (!tracked || !samePath(ground.path, tracked)) {
+        tracked = ground.path;
+        acquired = false;
+      }
       return;
     }
   }
@@ -492,7 +512,15 @@ function tabToChild(backwards: boolean): void {
 }
 
 window.addEventListener('keydown', (e) => {
-  const panStep = e.shiftKey ? 240 : 60;
+  /**
+   * How far one press moves the view, IN PIXELS.
+   *
+   * It used to be a per-frame velocity of 60, which decayed to a travel of about 190 px -- and when the
+   * fling became frame-rate independent the same 60 was handed to `flingBy`, which reads it as the distance
+   * itself. That quietly cut two-thirds off every arrow key: crossing a 1600 px viewport went from six
+   * presses to thirteen. These are the distances the old nudge actually covered.
+   */
+  const panStep = e.shiftKey ? 750 : 190;
   switch (e.key) {
     case '+':
     case '=':
@@ -522,9 +550,14 @@ window.addEventListener('keydown', (e) => {
      * Escape is the brake: whatever the view was doing of its own accord, it stops doing it, and it stops
      * where it is rather than snapping back or completing the move. A two-second flight you did not mean to
      * start was previously something you had to sit through.
+     *
+     * Including the flight that has not begun yet: a single click waits a third of a second to find out
+     * whether it is half of a double click, so the brake has to reach into that window too or it stops the
+     * view and the queued click immediately launches it again.
      */
     case 'Escape':
       cancelFlight();
+      input.cancelPendingClick();
       tracked = null;
       acquired = false;
       flingBy(input, 0, 0);
@@ -652,15 +685,6 @@ Object.assign(window as unknown as Record<string, unknown>, {
   __isInhabited: isInhabited,
   __makeChild: makeChild,
   /**
-   * Step sideways along the rim, slot by slot, until the ground under the camera is somewhere people live.
-   *
-   * For the review harness. Diving straight down lands wherever the geometry puts it, and most of most worlds is
-   * ocean, so every surface screenshot came back as sea bed under deep water -- an honest picture of a real place and
-   * useless for looking at buildings. Nudging `fx` does not work: the camera can sit outside its own focus node
-   * without `updateFocus` doing anything about it, so the focus never changes and the search never moves. This
-   * rebases properly, one slot per step, landing at the neighbour's centre.
-   */
-  /**
    * Step to a sibling planet until one is habitable enough for anyone to live on.
    *
    * For the review harness. Only about one world in eight is habitable, and diving straight down picks a planet by
@@ -686,12 +710,6 @@ Object.assign(window as unknown as Record<string, unknown>, {
     }
     return false;
   },
-  /**
-   * Advance the frozen clock until the star is well up at the camera's own angle round the rim.
-   *
-   * For the review harness. Half of every world is in night at any instant and a night shot tells you nothing
-   * about the colours, so this walks the clock in eighths of a day and stops at the brightest hour it finds.
-   */
   /** One line about the ground under the camera, for the review harnesses. */
   __describeHere: (): string => {
     const g = cam.node.ground;
@@ -703,6 +721,12 @@ Object.assign(window as unknown as Record<string, unknown>, {
       `sun ${sun.elevation.toFixed(2)} / ${describeBiosphere(biosphereOf(g.planetId))}`
     );
   },
+  /**
+   * Advance the frozen clock until the star is well up at the camera's own angle round the rim.
+   *
+   * For the review harness. Half of every world is in night at any instant and a night shot tells you nothing
+   * about the colours, so this walks the clock in eighths of a day and stops at the brightest hour it finds.
+   */
   __seekDaylight: (): number => {
     const g = cam.node.ground;
     if (!g) return 0;
@@ -721,6 +745,15 @@ Object.assign(window as unknown as Record<string, unknown>, {
     loop.wake();
     return bestElev;
   },
+  /**
+   * Step sideways along the rim, slot by slot, until the ground under the camera is somewhere people live.
+   *
+   * For the review harness. Diving straight down lands wherever the geometry puts it, and most of most worlds is
+   * ocean, so every surface screenshot came back as sea bed under deep water -- an honest picture of a real place and
+   * useless for looking at buildings. Nudging `fx` does not work: the camera can sit outside its own focus node
+   * without `updateFocus` doing anything about it, so the focus never changes and the search never moves. This
+   * rebases properly, one slot per step, landing at the neighbour's centre.
+   */
   __seekInhabited: (limit = 800): boolean => {
     // Waking is not optional. Teleporting the camera without it leaves the render loop asleep, so the next
     // screenshot is the frame from BEFORE the jump -- which read as houses drawn in the wrong place.
@@ -760,10 +793,14 @@ Object.assign(window as unknown as Record<string, unknown>, {
     setSimTime(seconds);
     loop.wake();
   },
-  /** What the last frame considered clickable, for the end-to-end navigation check. */
-  /** Diagnostic for the navigation check: what a click at this point would resolve to. */
+  /**
+   * Diagnostic for the navigation check: what a click at this point would resolve to, and the flight it
+   * would launch. Through `pick` rather than `pickAt`, or it reports a target where a click does nothing:
+   * standing on a region, every point that misses a settlement climbs to the planet and answers with the
+   * region you are already in, which `pick` rejects and a click therefore ignores.
+   */
   __probeClick: (x: number, y: number) => {
-    const hit = pickAt(cam, tree, view, lastHits, x, y);
+    const hit = pick(x, y);
     if (!hit) return { hit: null, flight: null };
     const planned = planFlight(cam, tree, hit.path, view);
     return {
@@ -801,6 +838,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
       r: hit.rPx,
     };
   },
+  /** What the last frame considered clickable, for the end-to-end navigation check. */
   __hits: () =>
     lastHits.map((h) => ({
       path: h.path.map((c) => `${c.cx}.${c.cy}`).join('/'),
@@ -816,7 +854,7 @@ Object.assign(window as unknown as Record<string, unknown>, {
     const stats = render(ctx, cam, tree, view);
     const ms = performance.now() - t0;
     (window as unknown as Record<string, unknown>).__lastDraws = stats.draws;
-  (window as unknown as Record<string, unknown>).__lastStats = stats;
+    (window as unknown as Record<string, unknown>).__lastStats = stats;
     return ms;
   },
 });

@@ -16,7 +16,8 @@
     "worlds": "node tools/worlds.ts",
     "relief": "node tools/relief.ts",
     "seams": "node tools/seam-check.ts",
-    "marks": "node tools/marks-check.ts"
+    "marks": "node tools/marks-check.ts",
+    "pops": "node tools/pop-check.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

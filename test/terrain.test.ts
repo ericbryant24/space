@@ -20,9 +20,9 @@ import {
   type Node,
 } from '../src/universe/node.ts';
 import { LEVELS } from '../src/universe/schema.ts';
-import { planetTraits } from '../src/universe/gen/planet.ts';
+import { HABITABLE_THRESHOLD, planetTraits } from '../src/universe/gen/planet.ts';
 
-const worlds = () => {
+const worlds_ = () => {
   const out = [];
   for (let i = 0; i < 60; i++) {
     const id = (i * 2654435761 + 12345) >>> 0;
@@ -49,7 +49,7 @@ const planetNode = (id: number, traits: ReturnType<typeof planetTraits>): Node =
  * inconsistency the field was built to remove.
  */
 test('finer detail refines the coastline instead of moving it', () => {
-  for (const { id, traits } of worlds()) {
+  for (const { id, traits } of worlds_()) {
     const sea = seaRadiusOf(id, traits);
     let sampled = 0;
     let disagree = 0;
@@ -83,7 +83,7 @@ test('finer detail refines the coastline instead of moving it', () => {
 /** Sea level is calibrated against the field, so `waterFraction` means what it says. */
 test('a world is as wet as its traits claim', () => {
   let worst = 0;
-  for (const { id, traits } of worlds()) {
+  for (const { id, traits } of worlds_()) {
     const land = landFractionOf(id, traits);
     const expected = 1 - traits.waterFraction;
     worst = Math.max(worst, Math.abs(land - expected));
@@ -103,7 +103,7 @@ test('a world is as wet as its traits claim', () => {
  * out honestly instead of drowning or drying every world -- the mistake the first version of this made.
  */
 test('the extremes have no shore, and say which they are', () => {
-  const { id, traits } = worlds()[0]!;
+  const { id, traits } = worlds_()[0]!;
 
   const dry = { ...traits, waterFraction: 0 };
   assert.equal(landFractionOf(id, dry), 1, 'a world with no water should be all land');
@@ -137,7 +137,7 @@ test('the ground is equally bumpy at every level of the ladder', () => {
   for (const [name, span] of spans) {
     const detail = Math.min(30, Math.round(Math.log2(1 / span)) + 8);
     const spread: number[] = [];
-    for (const { id, traits } of worlds().slice(0, 24)) {
+    for (const { id, traits } of worlds_().slice(0, 24)) {
       for (let t = 0; t < 6; t++) {
         const theta0 = (t / 6) * Math.PI * 2 + id * 1e-7;
         const base = groundAt(id, traits, theta0, detail);
@@ -179,7 +179,7 @@ test('detail rises with zoom, and both ends are bounded', () => {
 });
 
 test('a sea radius is stable for a planet, whatever asks for it', () => {
-  const { id, traits } = worlds()[3]!;
+  const { id, traits } = worlds_()[3]!;
   assert.equal(seaRadiusOf(id, traits), seaRadiusOf(id, traits), 'a cached sea radius must be the same number');
   // The cache is keyed on the water fraction too, so it cannot lie to a caller handing over modified traits.
   assert.notEqual(
@@ -202,7 +202,7 @@ test('nothing is inhabited below the waterline', () => {
   let checkedDry = 0;
   let checkedWet = 0;
 
-  for (const { id, traits } of worlds().slice(0, 12)) {
+  for (const { id, traits } of worlds_().slice(0, 12)) {
     const planet = planetNode(id, traits);
     const sea = seaRadiusOf(id, traits);
 
@@ -230,11 +230,21 @@ test('nothing is inhabited below the waterline', () => {
   assert.ok(checkedDry > 200, `only ${checkedDry} dry addresses examined`);
 });
 
-/** And some of the dry ones ARE inhabited, or the rule above passes on an empty universe. */
-test('dry ground is settled at roughly the density the schema claims', () => {
+/**
+ * And some of the dry ones ARE inhabited, or the rule above passes on an empty universe.
+ *
+ * On a HABITABLE world only. Nothing is built on a five-hundred-kelvin cinder however dry its ground is, which is
+ * the second half of what `isInhabited` decides -- and the half that keeps houses off worlds with no culture, no
+ * language and no name for themselves. Counting across all worlds instead measured the two rules multiplied
+ * together and reported nine percent for a schema that says thirty-four.
+ */
+test('dry ground on a habitable world is settled at the density the schema claims', () => {
   let dry = 0;
   let built = 0;
-  for (const { id, traits } of worlds().slice(0, 8)) {
+  let worlds = 0;
+  for (const { id, traits } of worlds_().slice(0, 40)) {
+    if (traits.habitability < HABITABLE_THRESHOLD) continue;
+    worlds++;
     const planet = planetNode(id, traits);
     const sea = seaRadiusOf(id, traits);
     for (const rref of rimChildren(planet).slice(0, 40)) {
@@ -250,12 +260,32 @@ test('dry ground is settled at roughly the density the schema claims', () => {
       }
     }
   }
+  assert.ok(worlds >= 3, `only ${worlds} habitable worlds in the sample`);
   assert.ok(dry > 500, `only ${dry} dry building slots found`);
   const rate = built / dry;
   assert.ok(
     Math.abs(rate - LEVELS.settlement.density) < 0.06,
     `${(100 * rate).toFixed(1)}% of dry slots are built on; the schema says ${100 * LEVELS.settlement.density}%`,
   );
+});
+
+/** NOTHING IS BUILT ON A WORLD NOBODY COULD LIVE ON, however dry and however temperate the stretch of ground. */
+test('an uninhabitable world has nothing built on it anywhere', () => {
+  let checked = 0;
+  for (const { id, traits } of worlds_()) {
+    if (traits.habitability >= HABITABLE_THRESHOLD) continue;
+    const planet = planetNode(id, traits);
+    for (const rref of rimChildren(planet).slice(0, 12)) {
+      const region = makeChild(planet, rref);
+      assert.ok(!isInhabited(region), `a region on uninhabitable planet ${id} counts as inhabited`);
+      for (const sref of rimChildren(region).slice(0, 6)) {
+        const sett = makeChild(region, sref);
+        checked++;
+        assert.ok(!isInhabited(sett), `a settlement on uninhabitable planet ${id} counts as inhabited`);
+      }
+    }
+  }
+  assert.ok(checked > 200, `only ${checked} addresses on uninhabitable worlds examined`);
 });
 
 /**
@@ -265,7 +295,7 @@ test('dry ground is settled at roughly the density the schema claims', () => {
  * direction away from the planet's centre, which is different for every region. `theta` is what carries that.
  */
 test('the ground frame composes down the tree', () => {
-  const { id, traits } = worlds()[5]!;
+  const { id, traits } = worlds_()[5]!;
   const planet = planetNode(id, traits);
   const refs = rimChildren(planet);
   assert.ok(refs.length > 8, 'a planet should tile its rim with many regions');
@@ -303,7 +333,7 @@ test('the ground frame composes down the tree', () => {
 
 /** Slot counts stay bounded, or a planet's rim becomes a per-frame walk over millions of children. */
 test('rim slot counts are powers of two and bounded', () => {
-  const { id, traits } = worlds()[2]!;
+  const { id, traits } = worlds_()[2]!;
   const planet = planetNode(id, traits);
   let node: Node = planet;
   for (const kind of ['planet', 'region', 'settlement'] as const) {
@@ -319,7 +349,7 @@ test('rim slot counts are powers of two and bounded', () => {
 
 test('the coarse geography a planet is drawn from is the one placement uses', () => {
   // Two different detail levels, one shore. If these disagreed, a planet would draw a coast where nothing stands.
-  for (const { id, traits } of worlds().slice(0, 20)) {
+  for (const { id, traits } of worlds_().slice(0, 20)) {
     const sea = seaRadiusOf(id, traits);
     let flips = 0;
     for (let i = 0; i < 512; i++) {

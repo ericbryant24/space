@@ -25,21 +25,21 @@ import type { PlanetTraits } from '../universe/gen/planet.ts';
  * Sampled in two dimensions at (cos, sin) rather than on a 1D lattice of the angle, which costs nothing and
  * buys seamlessness: there is no wrap point to line up, because the circle closes on itself in the lattice.
  */
-function octave(seed: number, theta: number, level: number): number {
-  const f = 2 ** level;
-  const px = Math.cos(theta) * f;
-  const py = Math.sin(theta) * f;
+function octave(seed: number, ct: number, st: number, f: number, level: number): number {
+  const px = ct * f;
+  const py = st * f;
   const xi = Math.floor(px);
   const yi = Math.floor(py);
   const fx = px - xi;
   const fy = py - yi;
   const sx = fx * fx * (3 - 2 * fx);
   const sy = fy * fy * (3 - 2 * fy);
-  const at = (i: number, j: number) => f01(hash4(seed, i, j, level)) * 2 - 1;
-  const a = at(xi, yi);
-  const b = at(xi + 1, yi);
-  const c = at(xi, yi + 1);
-  const d = at(xi + 1, yi + 1);
+  // Inlined rather than closed over: this is the single most-called function in a surface frame, and a fresh
+  // closure per octave per sample was allocating tens of thousands of times a frame for nothing.
+  const a = f01(hash4(seed, xi, yi, level)) * 2 - 1;
+  const b = f01(hash4(seed, xi + 1, yi, level)) * 2 - 1;
+  const c = f01(hash4(seed, xi, yi + 1, level)) * 2 - 1;
+  const d = f01(hash4(seed, xi + 1, yi + 1, level)) * 2 - 1;
   return (a + (b - a) * sx) * (1 - sy) + (c + (d - c) * sx) * sy;
 }
 
@@ -100,13 +100,19 @@ export const COAST_DETAIL = 9;
 export function groundAt(planetId: number, traits: PlanetTraits, theta: number, detail: number): number {
   const top = Math.min(FINEST_LEVEL, Math.max(COARSE_LEVEL, Math.round(detail)));
 
+  // The trig does not depend on the octave, and a surface plate asks for up to thirty of them per sample.
+  const ct = Math.cos(theta);
+  const st = Math.sin(theta);
+  const seed = planetId ^ 0x7e44a1;
   let sum = 0;
   let amp = 1;
   let norm = 0;
+  let f = 2 ** COARSE_LEVEL;
   for (let level = COARSE_LEVEL; level <= top; level++) {
-    sum += octave(planetId ^ 0x7e44a1, theta, level) * amp;
+    sum += octave(seed, ct, st, f, level) * amp;
     norm += amp;
     amp *= PERSISTENCE;
+    f *= 2;
   }
   /**
    * Shaped rather than used raw, so mountains have shoulders instead of being a sine wave. `massClass` stands

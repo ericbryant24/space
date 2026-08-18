@@ -70,7 +70,10 @@ const main = async () => {
   let tiles = await page.locator('.rail .mark').count();
   if (tiles !== 2) fail(`after keeping one view the rail holds ${tiles - 1} tiles plus the keep tile`);
   const shot = await page.evaluate(() => {
-    const raw = localStorage.getItem('almanac.marks.v1');
+    // The store is namespaced by universe seed -- a path means nothing in a universe that did not grow it -- so
+    // rather than rebuild `keyFor` here, take whichever key the page actually wrote.
+    const key = Object.keys(localStorage).find((k) => k.startsWith('almanac.marks.v2.'));
+    const raw = key ? localStorage.getItem(key) : null;
     const marks = raw ? (JSON.parse(raw) as { shot: string }[]) : [];
     return marks[0]?.shot ?? '';
   });

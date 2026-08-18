@@ -4,22 +4,64 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='13' fill='%23ffd166'/%3E%3C/svg%3E" />
 <style>
   :root {
-    --ink: #12141f;
+    /* Only ever seen for the instant before the canvas takes over; the renderer paints its own void. */
     --void: #080a12;
     --paper: #f2ecdd;
-    --panel: rgba(10, 13, 24, 0.72);
-    --hair: rgba(255, 255, 255, 0.1);
+    /**
+     * The chrome's own panel tone, and it is OPAQUE.
+     *
+     * It used to be a translucent fill with `backdrop-filter: blur(9px)` behind it. That asks the
+     * compositor to blur a region of a canvas that is fully repainted sixty times a second, so the
+     * blur is recomputed every frame for the whole life of the app -- and it is a soft graded wash
+     * sitting on top of a drawing whose first rule is that fills are flat. Both reasons point the
+     * same way, so it is a flat fill now.
+     *
+     * The renderer's own palettes are generated per node and live in TypeScript, so CSS cannot reach
+     * them; this is INK lifted a little, which is the panel role those palettes would hand back. INK
+     * is a luminance, not a hex -- Y = 0.035 -- so this is that hue and saturation solved to Y = 0.040.
+     *
+     * It used to be #161a29, which is Y = 0.011: three times darker than INK and, to within a
+     * rounding error, `voidBackground` itself (Y = 0.012). Over deep space that is 1.1:1 against the
+     * void, so the pill and the keep tile were not shapes at all -- they were their own 13% hairline,
+     * floating. The tone had drifted off the role its own comment named.
+     */
+    --panel: #2e3757;
+    --hair: rgba(242, 236, 221, 0.13);
+    /* The one accent, matching the filled rung and the favicon. */
+    --live: #ffd166;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; overflow: hidden; background: var(--void); }
+  html, body {
+    margin: 0;
+    height: 100%;
+    /* dvh, not vh: on mobile the browser's own chrome slides away and 100vh would crop the canvas. */
+    height: 100dvh;
+    overflow: hidden;
+    background: var(--void);
+    overscroll-behavior: none;
+  }
   body {
     font-family: Nunito, ui-sans-serif, system-ui, -apple-system, sans-serif;
     color: var(--paper);
     -webkit-font-smoothing: antialiased;
   }
-  #view { display: block; width: 100vw; height: 100vh; touch-action: none; cursor: crosshair; }
-  /* The overlay ignores the pointer so the canvas gets every drag; interactive bits opt back in. */
+  /**
+   * 100% rather than 100vw: vw counts a scrollbar gutter this page never has. And the same
+   * height pair as html/body, for a harder reason than theirs: where dvh does not parse, the second
+   * declaration is dropped, and main.ts sizes the render view from `clientHeight` -- so without a
+   * plain 100% underneath it the canvas falls back to its intrinsic attribute size and the whole
+   * universe is drawn at the wrong scale, rather than merely being cropped.
+   */
+  #view { display: block; width: 100%; height: 100%; height: 100dvh; touch-action: none; cursor: crosshair; }
+
+  /**
+   * The overlay ignores the pointer so the canvas gets every drag, and so does every container
+   * inside it. Only the controls themselves opt back in -- a panel's padding is not a control, and a
+   * drag that starts on it belongs to the universe underneath.
+   */
   #overlay { position: fixed; inset: 0; pointer-events: none; }
+  #overlay .rungs, #overlay .rail, #overlay .marks, #overlay .hud { pointer-events: none; }
+  #overlay button { pointer-events: auto; }
 
   /**
    * The default view has NO WORDS ON IT. What is left is a ladder of eight rungs and a rail of kept places, and
@@ -27,17 +69,16 @@
    */
   .hud {
     position: absolute;
-    top: 46px;
+    top: 66px;
     left: 50%;
     transform: translateX(-50%);
     padding: 9px 13px;
     border-radius: 13px;
     background: var(--panel);
     border: 1px solid var(--hair);
-    backdrop-filter: blur(9px);
-    display: none;
   }
-  .hud.measuring { display: block; }
+  /* Hidden means gone: out of the layout, out of the tab order, and out of innerText. */
+  .hud[hidden] { display: none; }
   .hud .rows { font: 11.5px/1.7 ui-monospace, "Space Mono", SFMono-Regular, Menlo, monospace; }
   .hud .rows > div { white-space: nowrap; }
   .dim { color: rgba(242, 236, 221, 0.4); }
@@ -52,53 +93,114 @@
     transform: translateX(-50%);
     display: flex;
     align-items: center;
-    gap: 7px;
-    padding: 7px 11px;
+    /* 14px caps, which is half the 26px pip pitch: both ends of the ladder are half a step. */
+    padding: 3px 14px 11px;
     border-radius: 999px;
     background: var(--panel);
     border: 1px solid var(--hair);
-    backdrop-filter: blur(9px);
-    pointer-events: auto;
   }
+  /**
+   * The pip is a 26px box with a 9px dot drawn inside it. The dot is the picture; the box is the
+   * thing your finger has to hit, and under about 24px that is a coin toss on a phone.
+   */
   .rungs .pip {
     appearance: none;
-    width: 9px;
-    height: 9px;
+    position: relative;
+    width: 26px;
+    height: 26px;
     padding: 0;
+    border: 0;
     border-radius: 50%;
-    border: 1.5px solid rgba(242, 236, 221, 0.3);
     background: transparent;
     cursor: pointer;
+  }
+  .rungs .pip::before {
+    content: '';
+    position: absolute;
+    left: 50%;
+    top: 50%;
+    width: 9px;
+    height: 9px;
+    margin: -4.5px 0 0 -4.5px;
+    border-radius: 50%;
+    border: 1.5px solid rgba(242, 236, 221, 0.3);
     transition: background 120ms, border-color 120ms, transform 120ms;
   }
-  .rungs .pip:disabled { cursor: default; border-color: rgba(242, 236, 221, 0.16); }
-  .rungs .pip.past { border-color: rgba(242, 236, 221, 0.62); }
-  .rungs .pip.past:hover { background: rgba(242, 236, 221, 0.62); transform: scale(1.25); }
-  .rungs .pip.on {
-    background: #ffd166;
-    border-color: #ffd166;
-    transform: scale(1.35);
+  .rungs .pip:disabled { cursor: default; }
+  .rungs .pip:disabled::before { border-color: rgba(242, 236, 221, 0.16); }
+  .rungs .pip.past::before { border-color: rgba(242, 236, 221, 0.62); }
+  .rungs .pip.past:hover::before { background: rgba(242, 236, 221, 0.62); transform: scale(1.25); }
+  .rungs .pip.on::before { background: var(--live); border-color: var(--live); transform: scale(1.35); }
+  /* Inset so the ring stays inside the pill rather than punching through its edge. */
+  .rungs .pip:focus-visible { outline: 2px solid var(--live); outline-offset: -2px; }
+
+  /**
+   * Where you are BETWEEN two rungs.
+   *
+   * Eight pips tell you which rung you are on and nothing else, so most of a descent -- and a galaxy
+   * is thirty doublings deep on its own -- reads as a chrome that has stopped responding. This dot
+   * carries the fraction, so the ladder moves whenever the camera does. Placed by hud.ts.
+   */
+  .rungs .trace {
+    position: absolute;
+    left: 0;
+    bottom: 4px;
+    width: 5px;
+    height: 5px;
+    margin-left: -2.5px;
+    border-radius: 50%;
+    background: var(--live);
   }
 
-  /* Places you kept. A column of thumbnails, and one empty tile that keeps the view you are looking at. */
+  /**
+   * Places you kept. A column of thumbnails that scrolls, and one tile at the foot of it that keeps
+   * the view you are looking at.
+   *
+   * The keep tile is outside the scrolling part on purpose: a rail full of thumbnails used to push it
+   * off the bottom of the screen, so the fuller the rail got the harder it was to add to.
+   */
   .rail {
     position: absolute;
     right: 14px;
     top: 14px;
     display: flex;
     flex-direction: column;
+    /* flex-end rather than stretch, so the gutter below can be paid for with a negative margin. */
+    align-items: flex-end;
     gap: 7px;
-    pointer-events: auto;
-    max-height: calc(100vh - 28px);
+    max-height: calc(100dvh - 28px);
+  }
+  /**
+   * A scroll box clips what leans out of it, and two things here lean out: the swell a tile makes
+   * under the cursor, and the focus ring, which is a 2px outline at a 2px offset and therefore
+   * reaches 4px past the tile. The padding gives them room and the matching negative margin gives the
+   * room straight back, so nothing on the rail moves. It has to be the ring's full 4px: at 3px the
+   * gutter clipped the outer pixel of the one thing it exists to protect.
+   */
+  .rail .marks {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+    min-height: 0;
+    padding: 4px;
+    margin: -4px;
     overflow-y: auto;
     scrollbar-width: none;
   }
-  .rail::-webkit-scrollbar { display: none; }
+  .rail .marks::-webkit-scrollbar { display: none; }
   .mark {
     position: relative;
-    appearance: none;
+    flex: none;
     width: 58px;
     height: 40px;
+    /* The tile is entirely control: its face goes to the view, its corner forgets it. */
+    pointer-events: auto;
+  }
+  .mark .go {
+    appearance: none;
+    display: block;
+    width: 100%;
+    height: 100%;
     padding: 0;
     border-radius: 8px;
     border: 1px solid var(--hair);
@@ -106,35 +208,66 @@
     cursor: pointer;
     transition: transform 120ms, border-color 120ms;
   }
-  .mark:hover { transform: scale(1.06); border-color: rgba(255, 209, 102, 0.85); }
+  .mark .go:hover { transform: scale(1.06); border-color: rgba(255, 209, 102, 0.85); }
+  .mark .go:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
+  /**
+   * Same trick as the pips: a 24px box for the finger, a 16px disc for the eye. It sits INSIDE the
+   * tile rather than hanging off its corner, because a badge that hangs off is the first thing a
+   * scrolling rail cuts in half.
+   */
   .mark .drop {
+    appearance: none;
     position: absolute;
-    top: -5px;
-    right: -5px;
-    width: 15px;
-    height: 15px;
+    top: 0;
+    right: 0;
+    width: 24px;
+    height: 24px;
+    padding: 0;
+    border: 0;
     border-radius: 50%;
-    background: rgba(10, 13, 24, 0.92);
-    border: 1px solid var(--hair);
+    background: transparent;
+    cursor: pointer;
     opacity: 0;
     transition: opacity 120ms;
   }
-  .mark:hover .drop { opacity: 1; }
+  .mark .drop .disc {
+    position: absolute;
+    left: 4px;
+    top: 4px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--panel);
+    border: 1px solid var(--hair);
+  }
   /* A cross, drawn rather than typed: two strokes, no glyph, no language. */
   .mark .drop::before,
   .mark .drop::after {
     content: '';
     position: absolute;
-    left: 3px;
-    top: 6.5px;
-    width: 7px;
+    left: 50%;
+    top: 50%;
+    width: 8px;
     height: 1.5px;
     background: rgba(242, 236, 221, 0.75);
   }
-  .mark .drop::before { transform: rotate(45deg); }
-  .mark .drop::after { transform: rotate(-45deg); }
+  .mark .drop::before { transform: translate(-50%, -50%) rotate(45deg); }
+  .mark .drop::after { transform: translate(-50%, -50%) rotate(-45deg); }
+  /* Reachable without a pointer: by keyboard through the tile, and always shown where hover does not exist. */
+  .mark:hover .drop,
+  .mark:focus-within .drop { opacity: 1; }
+  .mark .drop:focus-visible { opacity: 1; outline: 2px solid var(--live); outline-offset: -2px; }
+  @media (hover: none) { .mark .drop { opacity: 1; } }
+
   /* And a plus on the empty tile, the same way. */
-  .mark.keep { border-style: dashed; border-color: rgba(242, 236, 221, 0.28); }
+  .mark.keep {
+    appearance: none;
+    padding: 0;
+    border-radius: 8px;
+    border: 1px dashed rgba(242, 236, 221, 0.28);
+    background: var(--panel);
+    cursor: pointer;
+  }
   .mark.keep::before,
   .mark.keep::after {
     content: '';
@@ -143,14 +276,38 @@
     top: 50%;
     background: rgba(242, 236, 221, 0.45);
     transform: translate(-50%, -50%);
+    transition: background 120ms;
   }
   .mark.keep::before { width: 15px; height: 1.6px; }
   .mark.keep::after { width: 1.6px; height: 15px; }
   .mark.keep:hover::before,
-  .mark.keep:hover::after { background: #ffd166; }
+  .mark.keep:hover::after { background: var(--live); }
+  .mark.keep:focus-visible { outline: 2px solid var(--live); outline-offset: 2px; }
 
+  /**
+   * Small screens get smaller tiles -- fourteen of them plus the keep tile have to fit down the side
+   * of a phone -- and the forget badge does NOT scale with them by default, so a 24px badge on a
+   * 46x32 tile covers two fifths of the picture that IS the bookmark's name. Worse, that is where the
+   * badge is always visible: a phone has no hover, so it never goes away. Forgetting is final, the
+   * shot is gone from storage, and there is no undo, so it is a corner here rather than a quadrant --
+   * still a real target, just no longer the loudest thing on the tile.
+   */
   @media (max-width: 720px) {
     .mark { width: 46px; height: 32px; }
+    .mark .drop { width: 18px; height: 18px; }
+    .mark .drop .disc { left: 2px; top: 2px; width: 14px; height: 14px; }
+  }
+
+  /**
+   * Someone who has asked for less movement has asked for it from the chrome too. The universe still
+   * moves -- that is the thing itself, not decoration -- but nothing here needs to slide or swell.
+   */
+  @media (prefers-reduced-motion: reduce) {
+    .rungs .pip::before,
+    .mark .go,
+    .mark .drop,
+    .mark.keep::before,
+    .mark.keep::after { transition: none; }
   }
 </style>
 <canvas id="view"></canvas>

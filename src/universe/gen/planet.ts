@@ -22,6 +22,15 @@ export type PlanetClass =
   | 'gasGiant'
   | 'iceGiant';
 
+/**
+ * Below this a world has no culture and nobody lives there -- it is a rock with a catalogue number.
+ *
+ * Lives here rather than beside the culture generator because PLACEMENT needs it: nothing is built on a
+ * five-hundred-kelvin cinder, and `isInhabited` in universe/node.ts is where that is decided. Keeping the
+ * constant next to the trait it tests also keeps node.ts from having to import the language generator.
+ */
+export const HABITABLE_THRESHOLD = 0.34;
+
 export interface PlanetTraits {
   readonly cls: PlanetClass;
   readonly label: string;

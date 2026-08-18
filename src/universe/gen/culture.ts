@@ -3,7 +3,7 @@ import { motifOf, type Motif } from '../../culture/motif.ts';
 import { f01, hash2, hash3, pick, roll } from '../../core/rng.ts';
 import type { Node } from '../node.ts';
 import type { Tree } from '../tree.ts';
-import type { PlanetTraits } from './planet.ts';
+import { HABITABLE_THRESHOLD, type PlanetTraits } from './planet.ts';
 
 /**
  * A planet's culture.
@@ -12,6 +12,8 @@ import type { PlanetTraits } from './planet.ts';
  * about language, architecture or life is uniform at that scale. Everything here belongs to one world,
  * and its regions and settlements inherit it.
  */
+export { HABITABLE_THRESHOLD };
+
 export interface PlanetCulture {
   readonly inhabited: boolean;
   readonly language: Language;
@@ -21,8 +23,6 @@ export interface PlanetCulture {
   readonly population: number;
 }
 
-/** Below this a world has no culture to inherit -- it is a rock with a catalogue number. */
-export const HABITABLE_THRESHOLD = 0.34;
 
 const cache = new Map<number, PlanetCulture>();
 

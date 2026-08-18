@@ -149,6 +149,15 @@ const main = async () => {
      * building level is sixteen metres, which will not cross an ocean before the loop gives up.
      */
     if (SURFACE.has(LEVEL)) {
+      if (!(await descendTo(page, 'planet', AIM[attempt]!))) {
+        console.log(`  aim ${attempt}: never reached a planet`);
+        continue;
+      }
+      // Only about one world in eight is habitable, and nothing is built on the rest.
+      if (!(await page.evaluate(() => (window as unknown as { __seekHabitable(): boolean }).__seekHabitable()))) {
+        console.log(`  aim ${attempt}: nothing habitable in that system`);
+        continue;
+      }
       if (!(await descendTo(page, 'region', AIM[attempt]!))) {
         console.log(`  aim ${attempt}: never reached a region`);
         continue;
@@ -168,11 +177,24 @@ const main = async () => {
       console.log(`  aim ${attempt}: no one lives along that stretch`);
       continue;
     }
+    /**
+     * Freeze the clock at the brightest hour of this spot's day.
+     *
+     * Half of every world is in night at any instant, and a night shot says nothing about a world's colours. The
+     * night views are worth reviewing too, which is what POP/shots cover; this harness exists to look at the art.
+     */
+    if (SURFACE.has(LEVEL) || LEVEL === 'planet') {
+      await page.evaluate(() => (window as unknown as { __seekDaylight(): number }).__seekDaylight());
+    }
     await settle(page, 18);
 
+    // The chrome shows no words any more, so the harness asks the generators directly.
     const label = await page.evaluate(() => {
-      const el = document.querySelector('.hud');
-      return el ? (el.textContent ?? '').trim().replace(/\s+/g, ' ').slice(0, 76) : '';
+      const w = window as unknown as {
+        __cam: { node: { ground: { planetId: number; traits: { label: string }; theta: number } | null } };
+        __describeHere(): string;
+      };
+      return w.__cam.node.ground ? w.__describeHere() : '';
     });
     const name = `${String(found).padStart(2, '0')}-${LEVEL}`;
     await page.screenshot({ path: `${OUT}/${name}.png` });

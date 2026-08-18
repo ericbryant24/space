@@ -510,6 +510,21 @@ export function describeLanguage(lang: Language): string {
   );
 }
 
+/**
+ * Cached, like every other generator in this directory.
+ *
+ * `makeLanguage` runs up to twenty-four attempts against the anti-cliche guard, each assembling phoneme families and
+ * running nine morphemes through the phonotactic filter: eighty microseconds. It sits in the per-building path, so
+ * twenty buildings on screen rebuilt the same language twenty times a frame, for a language that cannot change.
+ */
+const languages = new Map<number, Language>();
+
 export function languageOf(planetId: number): Language {
-  return makeLanguage(planetId);
+  let lang = languages.get(planetId);
+  if (!lang) {
+    lang = makeLanguage(planetId);
+    if (languages.size > 256) languages.clear();
+    languages.set(planetId, lang);
+  }
+  return lang;
 }

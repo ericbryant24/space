@@ -1,5 +1,6 @@
 import { hash2, f01 } from '../../core/rng.ts';
 import { RELIEF } from '../../culture/terrain.ts';
+import { LEVELS } from '../../universe/schema.ts';
 import { climateAt, type Biome, type LocalClimate } from '../../culture/climate.ts';
 import { smoothstep } from '../bands.ts';
 import { atLuminance, hueDelta, luminanceOf, solveL, type Hsl } from '../color.ts';
@@ -58,6 +59,30 @@ export const SOIL_M = 2.5;
  */
 const SKIN_FLOOR_PX = 2;
 
+/** One planet radius, in metres. What turns a depth in planet units into a depth in a local frame. */
+const PLANET_METRES = 2 ** LEVELS.planet.logSpan;
+
+/**
+ * How much of a world's whole relief the soil and the sand may take up, at the very coarsest.
+ *
+ * The screen floors above are what keep the surface visible from a long way off, and left unbounded they run away
+ * with themselves: at ten pixels a planet's soil floor works out at a fifth of its radius and its beach at three
+ * tenths, against a living rind of 0.16 and a relief of 0.1. So a world seen as an icon was sand from pole to
+ * pole, with the biome soil only growing in later in the descent -- the surface's own colour arriving last of
+ * anything, which is precisely backwards.
+ *
+ * A beach cannot be taller than the hills behind it, and soil cannot be deeper than the rind it lies in. These
+ * are those two statements. They bite only where the screen floor would otherwise exceed them, which is at icon
+ * sizes and nowhere else, so nothing about a surface view changes.
+ */
+const SKIN_MAX_RELIEF = 0.4;
+const BEACH_MAX_RELIEF = 0.15;
+
+/** A depth given as a fraction of the world's relief, in the local frame's own units. */
+function ofRelief(fraction: number, metresPerUnit: number): number {
+  return (RELIEF * fraction * PLANET_METRES) / Math.max(1e-9, metresPerUnit);
+}
+
 /** Slope, as a dimensionless gradient, past which nothing holds and bare rock shows. */
 const SKIN_STEEP = 0.55;
 
@@ -75,7 +100,9 @@ const BEACH_TIDES = 3;
  * you approach without ever jumping.
  */
 export function skinDepth(pxPerUnit: number, metresPerUnit: number): number {
-  return Math.max(SKIN_FLOOR_PX / Math.max(1e-9, pxPerUnit), SOIL_M / Math.max(1e-9, metresPerUnit));
+  const real = SOIL_M / Math.max(1e-9, metresPerUnit);
+  const floor = SKIN_FLOOR_PX / Math.max(1e-9, pxPerUnit);
+  return Math.max(real, Math.min(floor, ofRelief(SKIN_MAX_RELIEF, metresPerUnit)));
 }
 
 /**
@@ -91,10 +118,9 @@ export function tidalRangeM(traits: PlanetTraits): number {
 
 /** How far above the water line sand reaches, in LOCAL units. Floored on screen for the same reason the skin is. */
 export function beachDepth(traits: PlanetTraits, pxPerUnit: number, metresPerUnit: number): number {
-  return Math.max(
-    (SKIN_FLOOR_PX * 1.5) / Math.max(1e-9, pxPerUnit),
-    (tidalRangeM(traits) * BEACH_TIDES) / Math.max(1e-9, metresPerUnit),
-  );
+  const real = (tidalRangeM(traits) * BEACH_TIDES) / Math.max(1e-9, metresPerUnit);
+  const floor = (SKIN_FLOOR_PX * 1.5) / Math.max(1e-9, pxPerUnit);
+  return Math.max(real, Math.min(floor, ofRelief(BEACH_MAX_RELIEF, metresPerUnit)));
 }
 
 /**

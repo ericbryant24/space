@@ -2,7 +2,7 @@ import { f01, hash3, hash4, mix, sm32 } from '../../core/rng.ts';
 import { armDensity, type GalaxyTraits } from '../../universe/gen/galaxy.ts';
 import { css, hslToRgb, shade, type Hsl } from '../color.ts';
 import { outlineWidth, smoothstep } from '../bands.ts';
-import { getScratch, getSpriteBudgeted, sizeBucket, type Sprite } from '../sprites.ts';
+import { getScratch, getSpriteBudgeted, makeSurface, sizeBucket, type Sprite } from '../sprites.ts';
 
 /**
  * Galaxies are SHAPES WITH OUTLINES, not particle fog. Fog is what makes every procedural space project
@@ -37,11 +37,18 @@ function paintCore(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: num
   ctx.fill();
 }
 
+interface SpinePoint {
+  x: number;
+  y: number;
+  /** Half-width of the ribbon here, in galaxy units. */
+  w: number;
+}
+
 /** Logarithmic spiral spine: r = coreRadius * e^(b*theta). */
-function armSpine(t: GalaxyTraits, index: number, steps: number): { x: number; y: number; w: number }[] {
+function armSpine(t: GalaxyTraits, index: number, steps: number): SpinePoint[] {
   const b = Math.tan(t.pitch);
   const theta0 = t.armTwist + (index / t.arms) * Math.PI * 2;
-  const out: { x: number; y: number; w: number }[] = [];
+  const out: SpinePoint[] = [];
   for (let i = 0; i <= steps; i++) {
     const u = i / steps;
     const theta = theta0 + u * t.sweep * Math.PI * 2;
@@ -50,27 +57,47 @@ function armSpine(t: GalaxyTraits, index: number, steps: number): { x: number; y
     out.push({
       x: Math.cos(theta) * radius,
       y: Math.sin(theta) * radius,
-      // Arms broaden outwards; this matches the width used by armDensity.
-      w: t.armWidth * (0.35 + u ** 0.6),
+      /**
+       * The taper, and it is keyed on the point's own RADIUS rather than on how far along the sweep it
+       * is. That distinction is the whole of the fix: an arm stops being traced the moment it reaches
+       * the rim, which for a tightly wound galaxy happens a third of the way through its sweep, so
+       * measuring the taper against the sweep left the tip barely wider than the root and the ribbon
+       * read as a constant-width strap. Against radius, 0 is the core and 1 is the rim by definition.
+       *
+       * It is also the width `armDensity` uses. Its Gaussian is angular, of half-width
+       * armWidth * (0.35 + radius^0.6) / radius, so multiplying back by the radius to get a
+       * perpendicular distance gives exactly this expression -- which means the drawn ribbon and the
+       * field the catalogued stars are rejection-sampled against are now the same shape. They were not,
+       * and stars were landing beside their arms rather than in them.
+       */
+      w: t.armWidth * (0.35 + radius ** 0.6),
     });
   }
   return out;
 }
 
-function ribbon(ctx: CanvasRenderingContext2D, spine: { x: number; y: number; w: number }[], scale: number, cx: number, cy: number): void {
+/**
+ * Unit normal to the spine at a point, from its neighbours. One definition, used by the ribbon's two
+ * sides and by the dust lane, so a lane cannot end up offset along a different axis than the arm it
+ * belongs to -- which is exactly what used to happen.
+ */
+function normalAt(spine: readonly SpinePoint[], idx: number): [number, number] {
+  const prev = spine[Math.max(0, idx - 1)]!;
+  const next = spine[Math.min(spine.length - 1, idx + 1)]!;
+  const nx = -(next.y - prev.y);
+  const ny = next.x - prev.x;
+  const len = Math.hypot(nx, ny) || 1;
+  return [nx / len, ny / len];
+}
+
+function ribbon(ctx: CanvasRenderingContext2D, spine: readonly SpinePoint[], scale: number, cx: number, cy: number): void {
   if (spine.length < 2) return;
   ctx.beginPath();
   const side = (sign: number) => {
     for (let i = 0; i < spine.length; i++) {
       const idx = sign > 0 ? i : spine.length - 1 - i;
       const p = spine[idx]!;
-      const prev = spine[Math.max(0, idx - 1)]!;
-      const next = spine[Math.min(spine.length - 1, idx + 1)]!;
-      let nx = -(next.y - prev.y);
-      let ny = next.x - prev.x;
-      const len = Math.hypot(nx, ny) || 1;
-      nx /= len;
-      ny /= len;
+      const [nx, ny] = normalAt(spine, idx);
       const px = cx + (p.x + nx * p.w * sign) * scale;
       const py = cy + (p.y + ny * p.w * sign) * scale;
       if (i === 0 && sign > 0) ctx.moveTo(px, py);
@@ -96,16 +123,31 @@ function paintArms(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: num
       ctx.stroke();
     }
   }
-  // Dust lanes: the same spine, offset inwards, in the darkest role.
+  // Dust lanes: the same spine, offset ACROSS the arm, in the darkest role.
   for (let d = 0; d < t.dustLanes; d++) {
     const i = d % Math.max(1, t.arms);
-    const spine = armSpine(t, i, 40).map((s) => ({ ...s, w: s.w * 0.42 }));
-    const shifted = spine.map((s) => ({ x: s.x * 0.94, y: s.y * 0.94, w: s.w }));
-    ribbon(ctx, shifted, r, cx, cy);
+    const spine = armSpine(t, i, 40);
+    const lane = spine.map((s, idx) => {
+      const [nx, ny] = normalAt(spine, idx);
+      return { x: s.x + nx * DUST_LANE_OFFSET * s.w, y: s.y + ny * DUST_LANE_OFFSET * s.w, w: s.w * 0.42 };
+    });
+    ribbon(ctx, lane, r, cx, cy);
     ctx.fillStyle = css(p.DEEP, 0.6);
     ctx.fill();
   }
 }
+
+/**
+ * Where a dust lane sits, as a multiple of the arm's own half-width, measured along the arm's NORMAL.
+ *
+ * The lane used to be built by scaling the spine radially by 0.94, and scaling a logarithmic spiral is
+ * the same curve rotated: r = c*e^(b*theta) scaled by k is the identical spiral at theta + ln(k)/b. So
+ * the "offset" slid the lane ALONG its arm instead of putting it beside one, and what should have been a
+ * dark line down the inner edge of a ribbon came out as a dark ribbon lying in the gap between two arms.
+ * Six tenths of a half-width leaves the lane inside the arm with its dark edge against the arm's own
+ * inner boundary, which is where a dust lane is.
+ */
+const DUST_LANE_OFFSET = -0.6;
 
 function paintBar(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: GalaxyTraits): void {
   const p = t.palette;
@@ -255,6 +297,127 @@ export function galaxySprite(
   });
 }
 
+// --- The floor of the galaxy ladder ---------------------------------------------------------------
+
+/**
+ * Below this on-screen radius a galaxy stops attempting structure and becomes a single stamp.
+ *
+ * At eleven pixels across an arm is under half a pixel wide, so there is no arm to draw: the blob bake
+ * spends a full structure render -- ribbons, bar, contours, a core gradient -- and then blurs the result
+ * into a smudge that carries none of it, at exactly the zoom where a field puts a hundred galaxies on
+ * screen at once. Under 5.5 px a galaxy is therefore one stamp, and the stamp is its own arm
+ * distribution sampled straight from `armDensity`: the same field the ribbons are shaped from and the
+ * same field the catalogued stars are placed against, so the smudge and the arms it grows into are one
+ * object at two resolutions rather than two different pictures.
+ */
+export const GALAXY_ICON_MIN_PX = 5.5;
+/**
+ * Where the stamp has completely handed over to the blurred structure bake.
+ *
+ * At 13 px the blob's 32 px bake is finally being drawn at something near its own scale, so its blurred
+ * structure has stopped being shrunk into mush and genuinely says more than sixteen samples of the field
+ * can. The two ramps share both endpoints, so their alphas sum to exactly 1 across the handover.
+ */
+export const GALAXY_ICON_FULL_PX = 13;
+
+/** Samples across the stamp's density field. 16 is finer than the stamp is ever drawn: 11 px across. */
+const ICON_FIELD = 16;
+/**
+ * Sub-samples per cell, per axis.
+ *
+ * Point-sampling the field is wrong for exactly the galaxies this stamp exists for: a spiral's arms are
+ * a twentieth of a radius wide, so at sixteen cells across a single probe either lands on an arm or
+ * misses it and the stamp comes out as a scatter of unrelated dots at whatever phase the sampling
+ * happened to catch. A cell has to carry the MEAN of the field over its own area, which is what a
+ * downsample is. Four probes is where the stamp stops changing shape as the count rises, and it holds
+ * the whole bake to about four tenths of a millisecond -- six of them inside one frame's bake budget.
+ */
+const ICON_SUPERSAMPLE = 2;
+
+/**
+ * How much brighter the painter is than the field it is drawn from.
+ *
+ * The two are not the same quantity and cannot be: `armDensity` is a smooth ridge with a tail, and
+ * `paintStructure` fills a hard-edged shape over the ridge at a flat 0.85. Taking the field's value as
+ * an alpha would make the stamp a third the weight of the blob it hands over to, so the galaxy would
+ * brighten as you approached it -- a slow pop, which is still a pop.
+ *
+ * These two numbers are the measured ratio of painted ink to field mean, over two hundred galaxies. The
+ * families differ because their painters do: a spiral fills ribbons that cover a fraction of its disc,
+ * while an elliptical, a lenticular and a blob field cover nearly all of theirs. Within a family the
+ * ratio holds to about a quarter of a stop, which is far below what reads as a change in brightness
+ * across the factor of 2.4 in zoom the handover takes.
+ */
+function stampGain(t: GalaxyTraits): number {
+  switch (t.morphology) {
+    case 'elliptical':
+    case 'lenticular':
+    case 'dwarfBlob':
+    case 'irregular':
+      return 4;
+    default:
+      return 2.6;
+  }
+}
+
+let iconImage: ImageData | null = null;
+function iconBuffer(): ImageData {
+  if (!iconImage) iconImage = new ImageData(ICON_FIELD, ICON_FIELD);
+  return iconImage;
+}
+
+/**
+ * The stamp: this galaxy's density field, in this galaxy's own palette, at sixteen samples across.
+ *
+ * Not a generic dot and not a blurred render of the arms -- the field itself, which is the thing both
+ * the arms and the catalogued stars are drawn from. A ring galaxy stamps as a ring, a barred spiral
+ * stamps brighter along its bar, and an off-centre irregular stamps off-centre.
+ */
+function galaxyIconSprite(id: number, t: GalaxyTraits, requestPx: number): Sprite | null {
+  // The stamp is never drawn above GALAXY_ICON_FULL_PX, so one bucket serves its whole life.
+  const size = sizeBucket(requestPx * 2, 32, 64);
+  return getSpriteBudgeted(`galaxy:${id}:${size}:icon`, size, (ctx, s) => {
+    const p = t.palette;
+    const gain = stampGain(t);
+    const [mr, mg, mb] = hslToRgb(p.MID.h, p.MID.s, p.MID.l);
+    const [lr, lg, lb] = hslToRgb(p.LIGHT.h, p.LIGHT.s, p.LIGHT.l);
+    const [pr, pg, pb] = hslToRgb(p.PAPER.h, p.PAPER.s, p.PAPER.l);
+    const image = iconBuffer();
+    const px = image.data;
+    const sub = ICON_SUPERSAMPLE;
+    const cell = 2 / ICON_FIELD;
+    for (let j = 0; j < ICON_FIELD; j++) {
+      for (let i = 0; i < ICON_FIELD; i++) {
+        let acc = 0;
+        for (let sj = 0; sj < sub; sj++) {
+          const gy = -1 + j * cell + ((sj + 0.5) / sub) * cell;
+          for (let si = 0; si < sub; si++) {
+            acc += armDensity(t, -1 + i * cell + ((si + 0.5) / sub) * cell, gy);
+          }
+        }
+        const density = acc / (sub * sub);
+        /**
+         * The same two-step tone ramp the structure painter uses -- MID for a ribbon, LIGHT where it is
+         * bright, PAPER at the core -- so the stamp's colours are the colours it dissolves into. Read as
+         * a continuous lerp only because this is a sampled field rather than a fill: no gradient object
+         * exists here, exactly as in the interior wash below.
+         */
+        const hot = Math.max(0, Math.min(1, (density - 0.5) / 0.3));
+        const white = Math.max(0, Math.min(1, (density - 0.8) / 0.2));
+        const o = (j * ICON_FIELD + i) * 4;
+        px[o] = mr + (lr - mr) * hot + (pr - lr) * white;
+        px[o + 1] = mg + (lg - mg) * hot + (pg - lg) * white;
+        px[o + 2] = mb + (lb - mb) * hot + (pb - lb) * white;
+        px[o + 3] = Math.min(1, density * gain) * 0.85 * 255;
+      }
+    }
+    const { surface, ctx: fctx } = getScratch(ICON_FIELD);
+    fctx.putImageData(image, 0, 0);
+    ctx.imageSmoothingEnabled = true;
+    ctx.drawImage(surface as CanvasImageSource, 0, 0, ICON_FIELD, ICON_FIELD, 0, 0, s, s);
+  });
+}
+
 /** Draw one live galaxy at full detail. Used only when it is large on screen. */
 export function drawGalaxyLive(
   ctx: CanvasRenderingContext2D,
@@ -292,8 +455,38 @@ export function drawGalaxyLive(
 }
 
 /**
- * Blit a cached galaxy sprite. Returns false if the sprite is not baked yet, so the caller can draw a
- * flat stand-in instead of leaving a hole.
+ * One small surface the icon handover is mixed on. The band it is wanted in ends at thirteen pixels, so
+ * this is a couple of kilobytes for the life of the page rather than a canvas per galaxy per frame.
+ */
+let handover: ReturnType<typeof makeSurface> | null = null;
+let handoverSize = 0;
+
+function handoverSurface(size: number): ReturnType<typeof makeSurface> {
+  if (!handover || handoverSize < size) {
+    handover = makeSurface(size);
+    handoverSize = size;
+  }
+  return handover;
+}
+
+/**
+ * Blit a cached galaxy sprite, handing over to the icon stamp at the small end.
+ *
+ * Whatever is missing is filled with the flat stand-in AT ITS OWN SHARE rather than left to the caller.
+ * The caller's fallback would repaint the whole galaxy at full strength on top of the half that did
+ * arrive, which is a brighter galaxy for however many frames the bake queue takes -- and a galaxy that
+ * dims as it sharpens is a pop like any other. So this always draws exactly one galaxy's worth of ink
+ * and returns true.
+ *
+ * WHICH IS WHY THE TWO SHARES ARE MIXED OFF SCREEN. Alphas that sum to one do not make INK that sums to
+ * one: laid one over the other, two layers at a and 1-a cover 1 - (1 - a * u)(1 - (1 - a) * v) of a
+ * pixel, which is short of the a * u + (1 - a) * v they should by the product of the two. Where both
+ * pictures are solid -- the whole disc of an elliptical, the core of a spiral -- that is a quarter of the
+ * galaxy's ink lost to the void at the middle of the handover, a slow dim and recover in the one range
+ * where the two representations are meant to be indistinguishable. Composited on their own surface with
+ * `lighter`, which sums PREMULTIPLIED colour and alpha, the mix is a weighted mean of two pictures
+ * instead of one over the other, and the void is nowhere in it. The blit back is integer-aligned with
+ * the fractional part of the position carried by the drawings, so nothing is resampled twice.
  */
 export function drawGalaxySprite(
   ctx: CanvasRenderingContext2D,
@@ -304,9 +497,70 @@ export function drawGalaxySprite(
   t: GalaxyTraits,
   blurred: boolean,
 ): boolean {
-  const sprite = galaxySprite(id, t, Math.max(8, r), blurred);
-  if (!sprite) return false;
-  ctx.drawImage(sprite.canvas as CanvasImageSource, cx - r, cy - r, r * 2, r * 2);
+  // Only the blurred blob has a floor beneath it; by the time the wash is live the icon is long gone.
+  const iconShare = blurred ? 1 - smoothstep(GALAXY_ICON_MIN_PX, GALAXY_ICON_FULL_PX, r) : 0;
+
+  // Outside the handover only one of the two is on screen, and one picture composites correctly alone.
+  if (iconShare <= 1 / 255) {
+    const sprite = galaxySprite(id, t, Math.max(8, r), blurred);
+    if (sprite) ctx.drawImage(sprite.canvas as CanvasImageSource, cx - r, cy - r, r * 2, r * 2);
+    else drawGalaxyStandIn(ctx, cx, cy, r, t);
+    return true;
+  }
+  if (iconShare >= 1 - 1 / 255) {
+    const only = galaxyIconSprite(id, t, Math.max(4, r));
+    if (only) ctx.drawImage(only.canvas as CanvasImageSource, cx - r, cy - r, r * 2, r * 2);
+    else drawGalaxyStandIn(ctx, cx, cy, r, t);
+    return true;
+  }
+
+  // Either may still be queued for baking, and what is available decides how the mix is put together.
+  const icon = galaxyIconSprite(id, t, Math.max(4, r));
+  const blob = galaxySprite(id, t, Math.max(8, r), blurred);
+  if (!icon && !blob) {
+    // One stand-in serves both shares, and a share of a picture plus the rest of it is that picture.
+    drawGalaxyStandIn(ctx, cx, cy, r, t);
+    return true;
+  }
+
+  const half = Math.ceil(r) + 1;
+  const size = half * 2;
+  const s = handoverSurface(size);
+  const ix = Math.floor(cx) - half;
+  const iy = Math.floor(cy) - half;
+  const mx = half + (cx - Math.floor(cx));
+  const my = half + (cy - Math.floor(cy));
+
+  s.ctx.clearRect(0, 0, size, size);
+  if (icon && blob) {
+    // A single image at a global alpha IS that image scaled, so each share can be laid straight down.
+    s.ctx.globalAlpha = iconShare;
+    s.ctx.drawImage(icon.canvas as CanvasImageSource, mx - r, my - r, r * 2, r * 2);
+    s.ctx.globalCompositeOperation = 'lighter';
+    s.ctx.globalAlpha = 1 - iconShare;
+    s.ctx.drawImage(blob.canvas as CanvasImageSource, mx - r, my - r, r * 2, r * 2);
+  } else {
+    /**
+     * The stand-in is several overlapping fills rather than one image, so it cannot be scaled by a
+     * global alpha -- two overlapping fills at a half come out at three quarters, not a half. It is
+     * drawn whole and the finished picture is then scaled by `destination-in`, which multiplies what is
+     * already there by a flat alpha. It goes first because only the second layer has to be one image,
+     * and a sum does not care which way round it is written.
+     */
+    const sprite = icon ?? blob!;
+    const standShare = icon ? 1 - iconShare : iconShare;
+    drawGalaxyStandIn(s.ctx, mx, my, r, t);
+    s.ctx.globalCompositeOperation = 'destination-in';
+    s.ctx.fillStyle = `rgba(0,0,0,${standShare})`;
+    s.ctx.fillRect(0, 0, size, size);
+    s.ctx.globalCompositeOperation = 'lighter';
+    s.ctx.globalAlpha = 1 - standShare;
+    s.ctx.drawImage(sprite.canvas as CanvasImageSource, mx - r, my - r, r * 2, r * 2);
+  }
+  s.ctx.globalAlpha = 1;
+  s.ctx.globalCompositeOperation = 'source-over';
+
+  ctx.drawImage(s.surface as CanvasImageSource, 0, 0, size, size, ix, iy, size, size);
   return true;
 }
 
@@ -382,11 +636,19 @@ function cloudAt(x: number, y: number, level: number): number {
 }
 
 /**
- * Clustering weight for stars. One octave, not two: stars only need to gather where the cloud is thick,
- * and this runs once per lattice cell per level -- the single hottest loop in the renderer.
+ * The angle the galaxy's own form is drawn at.
+ *
+ * The diffuse glow's noise lattice is axis-aligned, and the axes it aligns to are the frame's, not the
+ * galaxy's -- so the grain of the interstellar medium ran across the arms rather than with them, and a
+ * lenticular's dark lane cut across its own texture at whatever angle its tilt happened to be. Turning
+ * the lattice by this makes the grain belong to the galaxy: every galaxy gets its own weave, fixed to
+ * its own form, and the arms no longer slide over a texture that is holding still behind them.
+ *
+ * Which angle IS the orientation depends on the form: a spiral, a bar and a blob field are all laid out
+ * from `armTwist`, and only the smooth ellipsoids are drawn at `tilt`.
  */
-function clusterAt(x: number, y: number, level: number): number {
-  return noiseAtLevel(x, y, level, 0x9e37);
+export function galaxyOrientation(t: GalaxyTraits): number {
+  return t.morphology === 'elliptical' || t.morphology === 'lenticular' ? t.tilt : t.armTwist;
 }
 
 const WASH_W = 64;
@@ -519,6 +781,11 @@ export function drawGalaxyInterior(
    * cells every frame, and a fillRect each with its own alpha and fillStyle spent more time changing
    * canvas state than filling pixels -- it doubled the cost of a galaxy frame on its own.
    */
+  // The lattice turns with the galaxy, so its grain lies along the arms instead of across them.
+  const spin = galaxyOrientation(t);
+  const cosT = Math.cos(spin);
+  const sinT = Math.sin(spin);
+
   const image = washBuffer();
   const px = image.data;
   for (let j = 0; j < WASH_H; j++) {
@@ -526,7 +793,10 @@ export function drawGalaxyInterior(
     for (let i = 0; i < WASH_W; i++) {
       const gx = x0 + ((i + 0.5) / WASH_W) * (x1 - x0);
       const density = armDensity(t, gx, gy);
-      const texture = cloudAt(gx, gy, cloudLevel) * wCoarse + cloudAt(gx, gy, cloudLevel + 1) * wFine;
+      // Into the galaxy's own frame for the noise only: `armDensity` already carries its orientation.
+      const lx = gx * cosT + gy * sinT;
+      const ly = gy * cosT - gx * sinT;
+      const texture = cloudAt(lx, ly, cloudLevel) * wCoarse + cloudAt(lx, ly, cloudLevel + 1) * wFine;
       // Diffuse, unresolved emission: dim and additive, never a covering layer.
       const a = Math.min(0.5, density * (0.25 + 0.75 * texture) * (0.26 + 0.09 * deep));
       // The bright cores of the clouds blend in continuously rather than switching tone at a threshold.

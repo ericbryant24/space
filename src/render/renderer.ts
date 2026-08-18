@@ -5,8 +5,6 @@ import {
   childAt,
   makeChild,
   nearestScatter,
-  orbitCount,
-  orbitRadius,
   orbitalChildren,
   rimChildren,
   scatterChildren,
@@ -23,6 +21,7 @@ import { cosmicPaletteOf, css, voidBackgroundFor } from './palettes.ts';
 import { drawGalaxyInterior, drawGalaxyLive, drawGalaxySprite, drawGalaxyStandIn } from './draw/galaxy.ts';
 import {
   beginStarBatch,
+  clusterCensus,
   drawContainer,
   drawStar,
   flushStarBatch,
@@ -30,7 +29,7 @@ import {
   starGlyphRadius,
   systemStarRadius,
 } from './draw/containers.ts';
-import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
+import { PLANET_ICON_MIN_PX, drawOrbitRings, drawPlanetIcon, skyTone } from './draw/planet.ts';
 import { PLATE_RIND, beginGroundFrame, drawSurfacePlate } from './draw/ground.ts';
 import { upAngleFor } from '../camera/orientation.ts';
 import { beginStructureFrame } from './draw/structures.ts';
@@ -51,7 +50,7 @@ const MIN_CHILD_PX = 1.1;
  * SIBLINGS of our own lineage, which is what stops each level looking like one lonely disc. Cost is
  * bounded anyway, because each level's cell iteration is clamped to the viewport.
  */
-const ANCESTOR_LIMIT_DIAGONALS = 64;
+export const ANCESTOR_LIMIT_DIAGONALS = 64;
 /** Past this the node's own silhouette is off-screen anyway; iterate its children but skip its disc. */
 const MAX_SELF_DRAW_DIAGONALS = 2.5;
 /**
@@ -93,7 +92,7 @@ const HIT_MIN_PX = 2.5;
  * not create ambiguity: the hit list is walked backwards, and children are recorded after their parents,
  * so the deepest thing under the cursor still wins.
  */
-const HIT_GRAB_PX = 15;
+export const HIT_GRAB_PX = 15;
 /** Parent size at which scattered children start to resolve, and at which they reach full strength. */
 const SCATTER_MIN_PARENT_PX = 110;
 const SCATTER_FULL_PARENT_PX = 320;
@@ -122,6 +121,14 @@ const MIN_CHILD_PX_BY_KIND: Partial<Record<Kind, number>> = {
    */
   region: 8,
   settlement: 8,
+  /**
+   * A galaxy has a stamp of its own below the size at which its arms are worth drawing -- see
+   * GALAXY_ICON_MIN_PX -- so the floor here is the size at which a galaxy stops being a mark on the screen at
+   * all. It has to be below where a cluster's swarm fades out, or a cluster between about thirty and seventy
+   * pixels shows neither: its own contents have faded and its galaxies have not appeared. See
+   * CLUSTER_SWARM_OUT_PX in draw/containers.ts, which is derived from the galaxy blob band's own fade-in.
+   */
+  galaxy: 0.45,
   // A building is a front elevation. Below a few pixels there is no elevation to read, only a tick mark.
   building: 5,
 };
@@ -711,13 +718,15 @@ function drawDiscUpright(
       rPx,
       { h: style.hue + drift, s: style.sat / 100, l: style.light / 100 },
       containerStrength,
+      // A cluster is drawn from its own galaxies -- how many there are, and what mix of shapes -- rather than as a
+      // plain wash with a number attached, so the swarm you see at cluster zoom is the field the galaxies resolve
+      // out of. Nothing else has a census: a field's children are clusters and a system's are its own planets.
+      node.kind === 'cluster' ? clusterCensus(node) : null,
     );
     if (node.kind === 'system') {
-      // Rings first, so bodies sit on top of their own orbits.
-      const palette = cosmicPaletteOf(node.id);
-      for (let i = 0; i < orbitCount(node); i++) {
-        drawOrbitRing(ctx, sx, sy, orbitRadius(i, orbitCount(node)) * rPx, palette.LIGHT);
-      }
+      // Rings first, so bodies sit on top of their own orbits. Each ring takes the colour of the world on it, so a
+      // system says which of its planets is which before any of them is big enough to resolve.
+      drawOrbitRings(ctx, sx, sy, rPx, node, cosmicPaletteOf(node.id).LIGHT);
       // A system's content is its star, and the star is minute next to the system's own extent.
       drawStar(ctx, sx, sy, rPx, node.id);
     }
