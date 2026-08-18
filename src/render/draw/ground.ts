@@ -349,8 +349,8 @@ export function drawSurfacePlate(
 
   // 5. What grows here.
   if (climate.land) {
-    drawGroundcover(ctx, g, climate, sky, cx, cy, r, detail, metresPerUnit, from, to);
-    drawFlora(ctx, g, climate, sky, cx, cy, r, detail, metresPerUnit, from, to);
+    drawGroundcover(ctx, g, climate, sky, cx, cy, r, detail, metresPerUnit, sea, from, to);
+    drawFlora(ctx, g, climate, sky, cx, cy, r, detail, metresPerUnit, sea, from, to);
   }
 
   /**
