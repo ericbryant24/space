@@ -3,7 +3,7 @@ import { f01, fSym, hash, hash2, hash3, hash4, mix, roll } from '../core/rng.ts'
 import { armDensity, galaxyShape } from './gen/galaxyShape.ts';
 import { orbitRadius } from './orbits.ts';
 import { KIND_ORDER, LEVELS, ROOT_KIND, anchorLevel, type Kind } from './schema.ts';
-import { planetTraits, type PlanetTraits } from './gen/planet.ts';
+import { HABITABLE_THRESHOLD, planetTraits, type PlanetTraits } from './gen/planet.ts';
 import { PLACEMENT_DETAIL, groundAt, seaRadiusOf } from '../culture/terrain.ts';
 
 export { orbitRadius };
@@ -104,6 +104,16 @@ export interface ChildRef {
    * be handed to the canvas without breaking the art direction.
    */
   readonly spin: number;
+  /**
+   * For a rim child: the angle round the planet it stands at, and the ground radius there.
+   *
+   * Carried rather than recomputed. `rimChild` works both out to place the slot and then threw them away, and
+   * `groundFor` immediately sampled the same field at the same angle and the same detail to fill in the child's
+   * frame -- sixteen octaves, five microseconds, for a number that was already in hand. A region plate builds
+   * thirty-two of these a frame and a settlement sixty.
+   */
+  readonly theta: number;
+  readonly baseRadius: number;
 }
 
 export function rootNode(seed: number): Node {
@@ -178,7 +188,7 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   // across its whole iteration for speed, and retaining it aliased every child's path to whichever
   // cell the loop last touched -- which silently corrupted node cache keys and made click-to-fly
   // resolve to an empty cell and do nothing.
-  return { cell: { cx: cell.cx, cy: cell.cy }, id, kind, logSpan, ox, oy, rel, spin: 0 };
+  return { cell: { cx: cell.cx, cy: cell.cy }, id, kind, logSpan, ox, oy, rel, spin: 0, theta: 0, baseRadius: 0 };
 }
 
 export function makeChild(parent: Node, ref: ChildRef): Node {
@@ -213,14 +223,16 @@ function groundFor(parent: Node, ref: ChildRef): Ground | null {
   }
   const g = parent.ground;
   if (!g) return null;
-  const theta = parent.kind === 'planet' ? Math.atan2(ref.oy, ref.ox) : angleAtOffset(g, ref.ox);
+  // A rim child already knows both, because placing it required them; anything else is a cell or an orbit, whose
+  // frame is its parent's turned by nothing and standing on nothing.
+  const theta = ref.baseRadius > 0 ? ref.theta : angleAtOffset(g, ref.ox);
   return {
     planetId: g.planetId,
     traits: g.traits,
     theta,
     span: g.span * ref.rel,
     // The child's origin sits on the ground line, which is where `rimChild` put it.
-    baseRadius: groundAt(g.planetId, g.traits, theta, PLACEMENT_DETAIL),
+    baseRadius: ref.baseRadius > 0 ? ref.baseRadius : groundAt(g.planetId, g.traits, theta, PLACEMENT_DETAIL),
   };
 }
 
@@ -293,6 +305,8 @@ export function orbitalChild(node: Node, index: number): ChildRef | null {
     oy: Math.sin(angle) * radius,
     rel,
     spin: 0,
+    theta: 0,
+    baseRadius: 0,
   };
 }
 
@@ -338,6 +352,29 @@ export function rimCells(node: Node): number {
   return 2 ** Math.max(1, Math.min(24, Math.round(Math.log2(want))));
 }
 
+/**
+ * The id a rim slot will have, without building the child.
+ *
+ * Exported because the painter needs it: a settlement seen from its region draws its own building slots before any
+ * of them is a node, and everything about how one looks -- its roof, its storeys, whether its windows are lit --
+ * hangs off this id. Two copies of the expression would mean every house on a horizon changed the moment you got
+ * close enough for it to become real.
+ */
+export function rimSlotId(node: Node, index: number): number {
+  return hash3(node.id, 0x21b0, index);
+}
+
+/**
+ * Whether the hash says a slot is lived in, without building the child.
+ *
+ * The other half of `isInhabited`, split out for the same reason. What is left there is the pair of terrain
+ * questions -- is this above water, is the world habitable at all -- which cost a field sample and are not asked
+ * of the thousands of slots a region plate can see at once.
+ */
+export function slotIsSettled(id: number, parentKind: Kind): boolean {
+  return f01(hash2(id, 0x01)) < LEVELS[parentKind].density;
+}
+
 /** Which rim slot a point in node units falls in. */
 export function rimCellAt(node: Node, nx: number, ny: number): number {
   const count = rimCells(node);
@@ -371,7 +408,7 @@ export function rimChild(node: Node, index: number): ChildRef | null {
    * which left hairline gaps of bare parent between plates wherever it came out narrow. A level's logSpan was
    * always a pacing knob rather than physics (see schema.ts), and here the pacing is what picks the slot count.
    */
-  const id = hash3(node.id, 0x21b0, index);
+  const id = rimSlotId(node, index);
   const u = -1 + ((index + 0.5) * 2) / count;
   const onPlanet = node.kind === 'planet';
   const theta = onPlanet ? u * Math.PI : angleAtOffset(g, u);
@@ -405,7 +442,7 @@ export function rimChild(node: Node, index: number): ChildRef | null {
    */
   if (!onPlanet && Math.abs(oy) + rel > 1) return null;
 
-  return { cell: { cx: index, cy: 0 }, id, kind, logSpan, ox, oy, rel, spin };
+  return { cell: { cx: index, cy: 0 }, id, kind, logSpan, ox, oy, rel, spin, theta, baseRadius: ground };
 }
 
 /**
@@ -419,9 +456,13 @@ export function rimChild(node: Node, index: number): ChildRef | null {
 export function isInhabited(node: Node): boolean {
   const g = node.ground;
   if (!g || node.kind === 'planet') return false;
+  // Nobody lives on a five-hundred-kelvin cinder or a frozen rock. Without this, houses appeared on worlds
+  // with no culture, no language and no name for themselves -- which is the one inconsistency the whole
+  // heritage chain exists to prevent.
+  if (g.traits.habitability < HABITABLE_THRESHOLD) return false;
   if (g.baseRadius <= seaRadiusOf(g.planetId, g.traits)) return false;
   const parentKind = KIND_ORDER[Math.max(0, KIND_ORDER.indexOf(node.kind) - 1)]!;
-  return f01(hash2(node.id, 0x01)) < LEVELS[parentKind].density;
+  return slotIsSettled(node.id, parentKind);
 }
 
 const rimCache = new Map<number, ChildRef[]>();
@@ -593,6 +634,8 @@ export function scatterChild(node: Node, index: number): ChildRef | null {
     oy,
     rel: 2 ** (logSpan - node.logSpan),
     spin: 0,
+    theta: 0,
+    baseRadius: 0,
   };
 }
 

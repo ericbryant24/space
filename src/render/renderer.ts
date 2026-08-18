@@ -239,7 +239,7 @@ export function render(
     stats,
   };
 
-  ctx.fillStyle = css(voidBackgroundFor(cam.node, tree));
+  ctx.fillStyle = css(voidBackgroundFor(cam.node, tree, 2 ** cam.k * r, diagonal));
   ctx.fillRect(0, 0, view.w, view.h);
 
   // A zoom changes every pixel on screen, so there is no dirty-rect path anywhere: full clear, full

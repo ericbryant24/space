@@ -60,6 +60,28 @@ export const BANDS: Readonly<Record<string, readonly BandSpec[]>> = {
 };
 
 /**
+ * A band's weight at a size, RAMPED IN DOUBLINGS rather than in pixels.
+ *
+ * The thresholds are still written in pixels, because pixels are what you can see; but zooming is exponential,
+ * so a ramp that is linear in pixels is lopsided in time. A band whose fade runs from 3 px to 9 px spends its
+ * first half in a third of a doubling and its second half in a whole one, and the alpha therefore lurches at
+ * the start of every transition and crawls at the end. Reparameterising by log2 makes each fade occupy a fixed
+ * number of doublings, which is the unit the camera actually moves in -- the pop detector reads this directly
+ * as a lower peak residual at every band edge.
+ *
+ * The partition property survives untouched: log2 is monotone, so adjacent bands sharing endpoints still have
+ * alphas summing to exactly one.
+ */
+function weight(band: BandSpec, r: number): number {
+  const lr = Math.log2(Math.max(1e-12, r));
+  const inA = Math.log2(band.in[0]);
+  const inB = Math.log2(band.in[1]);
+  const outA = band.out[0] === Infinity ? Infinity : Math.log2(band.out[0]);
+  const outB = band.out[1] === Infinity ? Infinity : Math.log2(band.out[1]);
+  return smoothstep(inA, inB, lr) * (1 - smoothstep(outA, outB, lr));
+}
+
+/**
  * Which representations are live at this on-screen size, and how strongly.
  * `bias` above 1 promotes cheaper representations earlier; the adaptive-quality knob feeds it.
  */
@@ -68,7 +90,7 @@ export function activeReps(kind: string, radiusPx: number, bias = 1): ActiveRep[
   const r = radiusPx / bias;
   const out: ActiveRep[] = [];
   for (const band of table) {
-    const alpha = smoothstep(band.in[0], band.in[1], r) * (1 - smoothstep(band.out[0], band.out[1], r));
+    const alpha = weight(band, r);
     if (alpha > 1 / 255) out.push({ rep: band.rep, alpha });
   }
   return out;
@@ -84,10 +106,7 @@ export function coverage(kind: string, radiusPx: number, bias = 1): number {
 function activeRepsRaw(kind: string, radiusPx: number, bias: number): ActiveRep[] {
   const table = BANDS[kind] ?? BANDS.generic!;
   const r = radiusPx / bias;
-  return table.map((band) => ({
-    rep: band.rep,
-    alpha: smoothstep(band.in[0], band.in[1], r) * (1 - smoothstep(band.out[0], band.out[1], r)),
-  }));
+  return table.map((band) => ({ rep: band.rep, alpha: weight(band, r) }));
 }
 
 /** Structural check that a band table really is a partition. Called by the test suite. */
