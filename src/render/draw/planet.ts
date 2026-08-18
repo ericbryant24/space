@@ -1,4 +1,5 @@
 import { simTime } from '../../core/clock.ts';
+import { coastlineOf } from '../../culture/terrain.ts';
 import { f01, hash2, hash3 } from '../../core/rng.ts';
 import { isGiant, type PlanetClass, type PlanetTraits } from '../../universe/gen/planet.ts';
 import { outlineWidth } from '../bands.ts';
@@ -10,7 +11,7 @@ import { atLuminance, css, hueDelta, luminanceOf, shade, solveL, type Hsl } from
  * did not quite work.
  */
 
-interface Surface {
+export interface Surface {
   land: Hsl;
   landShade: Hsl;
   sea: Hsl;
@@ -37,7 +38,7 @@ const BASE: Record<PlanetClass, { land: [number, number]; sea: [number, number] 
   iceGiant: { land: [196, 0.5], sea: [204, 0.45] },
 };
 
-function surfaceColours(t: PlanetTraits): Surface {
+export function surfaceColours(t: PlanetTraits): Surface {
   const base = BASE[t.cls];
   const light = t.starLight;
   // The star's light tints everything, and shadows take its complement: warm sun, cool shadows. One
@@ -104,14 +105,15 @@ function blobPath(
 }
 
 /**
- * Continents, flat, on the face you are looking at.
+ * Continents, traced from the planet's own terrain field.
  *
- * TRUE 2D. This used to be an orthographic projection of a sphere: continents were placed by longitude,
- * squashed by cos(lon) towards the limb, culled when they went round the back, and drifted with the
- * planet's day length. Every one of those is a three-dimensional claim, and together they made a planet
- * read as a rendered ball rather than as a thing on a map. A planet has ONE SET FACE now: land sits at a
- * fixed place on the disc, at its true size wherever it falls, and it stays there. It also stays there
- * while you aim at it, which is the other half of why this changed.
+ * Not blobs. Six wobbly blob paths were what this used to draw, and they existed nowhere except inside this
+ * function -- so nothing below the planet could agree with them, and the coastline you saw from orbit was
+ * not the coastline you would land on. The outline here is the zero crossing of `elevationAt`, the same
+ * function a region samples over its own patch, so agreement is not maintained, it is structural.
+ *
+ * Islands, bays and inland seas come free: they are simply what the field does, rather than shapes anyone
+ * had to decide to draw.
  */
 function paintContinents(
   ctx: CanvasRenderingContext2D,
@@ -122,32 +124,37 @@ function paintContinents(
   id: number,
   s: Surface,
 ): void {
-  const count = 5 + Math.floor(f01(hash2(id, 0x31)) * 7);
+  const coast = coastlineOf(id, t);
+  // No rings at all means no land: the trace is windowed so that outside every ring is water, so a world with
+  // nothing above sea level has nothing to draw and the disc's own sea colour is the whole picture.
+  if (coast.rings.length === 0) return;
+
   ctx.save();
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
   ctx.clip();
-  for (let i = 0; i < count; i++) {
-    /**
-     * Golden angle, not a free roll, for the bearing -- and sqrt for the distance so the disc fills evenly
-     * instead of piling up in the middle. Placed at random, half a dozen continents at these sizes landed
-     * on top of each other and merged into one lump filling the planet; spread this way they read as
-     * separate landmasses on a world, which is the whole point of drawing more than one.
-     */
-    const a = i * 2.39996 + f01(hash3(id, 0x32, i)) * 0.8;
-    const d = Math.sqrt((i + 0.55) / count) * 0.74;
-    const size = r * (0.1 + f01(hash3(id, 0x34, i)) * 0.17) * (1 - t.waterFraction * 0.5);
-    blobPath(ctx, cx + Math.cos(a) * d * r, cy + Math.sin(a) * d * r, size, hash3(id, 0x35, i));
-    ctx.fillStyle = css(s.land);
-    ctx.fill();
-    // A coastline in ink, not black: the outline is what makes flat fills read as drawn rather than as an
-    // untextured render.
-    const w = outlineWidth(size, 2);
-    if (w > 0) {
-      ctx.lineWidth = w;
-      ctx.strokeStyle = css(s.coast, 0.85);
-      ctx.stroke();
+
+  ctx.beginPath();
+  for (const ring of coast.rings) {
+    for (let i = 0; i < ring.length; i += 2) {
+      const px = cx + ring[i]! * r;
+      const py = cy + ring[i + 1]! * r;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
     }
+    ctx.closePath();
+  }
+  // Even-odd, so a ring inside a ring is a lake without anyone having to get the winding order right.
+  ctx.fillStyle = css(s.land);
+  ctx.fill('evenodd');
+
+  // A coastline in ink, not black: the outline is what makes flat fills read as drawn rather than as an
+  // untextured render.
+  const w = outlineWidth(r, 2);
+  if (w > 0) {
+    ctx.lineWidth = w;
+    ctx.strokeStyle = css(s.coast, 0.85);
+    ctx.stroke();
   }
   ctx.restore();
 }

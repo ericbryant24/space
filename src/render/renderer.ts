@@ -28,6 +28,7 @@ import {
   systemStarRadius,
 } from './draw/containers.ts';
 import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
+import { drawRegion } from './draw/ground.ts';
 import { planetTraitsFor, type PlanetTraits } from '../universe/gen/planet.ts';
 import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
 
@@ -393,7 +394,6 @@ const CONTAINER: Partial<Record<Kind, number>> = {
   // Interplanetary space is empty and dark. A strong wash here turned every system into a warm haze and
   // hid the galaxy behind it, so a system gets little more than its boundary and its orbits.
   system: 0.14,
-  region: 1,
   settlement: 1,
 };
 
@@ -417,6 +417,11 @@ function drawDisc(
     const traits = planetTraitsFor(node, frame.tree);
     // Returns the radius actually drawn, which may be the schematic floor rather than the true size.
     frame.lastDrawnRadius = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
+    return;
+  }
+
+  if (node.kind === 'region') {
+    drawRegion(ctx, sx, sy, rPx, node, frame.tree);
     return;
   }
 
