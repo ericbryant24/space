@@ -145,6 +145,14 @@ export interface RenderStats {
   /** Sprites still queued for baking; the loop keeps running until this clears. */
   spritesPending: boolean;
   topKind: Kind;
+  /**
+   * How far the scene was turned to put the ground the right way up -- see src/camera/orientation.ts.
+   *
+   * Reported because the pop detector's model of a zoom is a pure scale about the screen centre, and through the
+   * arrival at a world that is not the whole transform: the picture also turns. Without knowing by how much, the
+   * detector reads the turn as the biggest pop in the run.
+   */
+  up: number;
   hits: HitEntry[];
 }
 
@@ -215,6 +223,7 @@ export function render(
     budgetHit: false,
     spritesPending: false,
     topKind: cam.node.kind,
+    up: 0,
     hits: [],
   };
   beginSpriteFrame();
@@ -308,6 +317,7 @@ export function render(
   frame.up = upAngleFor(cam, frame.sky ? frame.sky.groundAlpha : 0);
   frame.cosUp = Math.cos(frame.up);
   frame.sinUp = Math.sin(frame.up);
+  stats.up = frame.up;
 
   // The planet's own disc is reached through the space-mode painter, which has no sky or viewport argument to take
   // one, so it is handed the frame's here instead. See `beginGroundFrame`.
