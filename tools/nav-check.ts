@@ -281,7 +281,101 @@ const main = async () => {
   if (arrived.kind !== 'system') fail(`scrolling into a star landed on ${arrived.kind}, expected system`);
   if (!star.path.startsWith(arrived.path)) fail(`landed in "${arrived.path}", which is not the star aimed at`);
 
-  // 10. A garbage URL must not break the page.
+  // 10. Finishing a pinch must not move the view.
+  //
+  // Playwright cannot pinch, so this dispatches the pointer events itself -- and deliberately lifts one
+  // finger a moment before the other, then moves the survivor, because that asymmetry is what the bug
+  // needed. A pinch takes the two-pointer path, which never updated the pan baseline, so the survivor's
+  // first move measured itself against wherever the first finger had been before the pinch started and
+  // panned by the whole gap in one frame, with an inertial fling behind it: "it's still snapping things off
+  // screen when I finish zooming (pinch zoom)".
+  //
+  // Pinch zoom is centred, so the assertion is simply that whatever was in the middle of the screen is
+  // still in the middle of the screen afterwards.
+  await page.goto(BASE, { waitUntil: 'load' });
+  await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 15000 });
+  await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
+  await page.evaluate(() =>
+    (window as unknown as { __recordAllHits(on: boolean): void }).__recordAllHits(true),
+  );
+  for (let i = 0; i < 400; i++) {
+    if ((await state(page)).kind === 'galaxy') break;
+    await page.evaluate(() => (window as unknown as { __diveStep(dz?: number): void }).__diveStep(0.5));
+  }
+  await settle(page, 12);
+  // Step 9 reloaded the page, so this needs its own baseline rather than that step's.
+  const pinchStart = await state(page);
+  if (pinchStart.kind !== 'galaxy') fail(`could not reach galaxy focus for the pinch check`);
+
+  const middle = await page.evaluate(() => {
+    const hits = (window as unknown as {
+      __hits(): { path: string; kind: string; x: number; y: number }[];
+    }).__hits();
+    const cx = window.innerWidth / 2;
+    const cy = window.innerHeight / 2;
+    return (
+      hits
+        .filter((h) => h.kind === 'system')
+        .sort((a, b) => Math.hypot(a.x - cx, a.y - cy) - Math.hypot(b.x - cx, b.y - cy))[0] ?? null
+    );
+  });
+  if (!middle) fail('no star near the middle of the screen to pinch around');
+  const beforeOff = Math.hypot(middle.x - 640, middle.y - 400);
+
+  await page.evaluate(() => {
+    const canvas = document.querySelector('canvas')!;
+    const send = (type: string, id: number, x: number, y: number) => {
+      canvas.dispatchEvent(
+        new PointerEvent(type, {
+          pointerId: id,
+          pointerType: 'touch',
+          isPrimary: id === 1,
+          clientX: x,
+          clientY: y,
+          bubbles: true,
+          cancelable: true,
+        }),
+      );
+    };
+    // Two fingers down either side of the middle, then spread them to zoom in.
+    send('pointerdown', 1, 540, 400);
+    send('pointerdown', 2, 740, 400);
+    for (let i = 1; i <= 10; i++) {
+      send('pointermove', 1, 540 - i * 14, 400);
+      send('pointermove', 2, 740 + i * 14, 400);
+    }
+    // One finger leaves first, and the other keeps reporting from where it already is for a few frames.
+    // That asymmetry is the whole point: the survivor is not moving, so nothing may pan.
+    send('pointerup', 1, 400, 400);
+    for (let i = 0; i < 4; i++) send('pointermove', 2, 880, 400);
+    send('pointerup', 2, 880, 400);
+  });
+  await settle(page, 30);
+
+  const afterOff = await page.evaluate((want: string) => {
+    const hits = (window as unknown as {
+      __hits(): { path: string; x: number; y: number }[];
+    }).__hits();
+    const h = hits.find((m) => m.path === want);
+    if (!h) return Number.POSITIVE_INFINITY;
+    return Math.hypot(h.x - window.innerWidth / 2, h.y - window.innerHeight / 2);
+  }, middle.path);
+
+  const zoomed = (await state(page)).z;
+  console.log(
+    `pinch     zoomed to z=${zoomed.toFixed(2)}; the middle star sat ${beforeOff.toFixed(1)}px off centre ` +
+      `before and ${Number.isFinite(afterOff) ? afterOff.toFixed(1) + 'px' : 'off screen'} after`,
+  );
+  // Centred zoom scales the offset with the scale, so compare against that rather than against zero.
+  const expected = beforeOff * 2 ** (zoomed - pinchStart.z);
+  if (!Number.isFinite(afterOff) || Math.abs(afterOff - expected) > 2) {
+    fail(
+      `finishing a pinch moved the view: the middle star is ${afterOff} px off centre, expected about ` +
+        `${expected.toFixed(1)} px`,
+    );
+  }
+
+  // 11. A garbage URL must not break the page.
   await page.goto(`${BASE}#s=!!!&p=zz.-1-oops&k=-9&z=NaN&o=x,y`, { waitUntil: 'load' });
   await page.waitForFunction('window.__cam !== undefined', null, { timeout: 15000 });
   await settle(page, 6);

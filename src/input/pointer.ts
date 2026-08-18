@@ -60,13 +60,32 @@ export function attachInput(
   view: () => View,
   wake: () => void,
 ): void {
-  let lastX = 0;
-  let lastY = 0;
+  /**
+   * Where the panning finger was last seen, or null when there is no valid baseline to measure from.
+   *
+   * Nullable on purpose, and it is the fix for a bug that made finishing a pinch throw the view off
+   * screen. A pinch takes the two-pointer branch of `pointermove`, which returns before touching this
+   * baseline -- so it stayed frozen at wherever the FIRST finger was just before the second one landed.
+   * Fingers never lift at the same instant, so the moment one left, the survivor's next move measured
+   * itself against that stale point and panned by the whole finger separation plus everything the pinch
+   * had travelled, in a single frame, and then set an inertial fling on top of it.
+   *
+   * Now the baseline is cleared whenever it cannot be trusted, and the next move re-establishes it
+   * instead of panning by the gap.
+   */
+  let panFrom: { x: number; y: number } | null = null;
   let downX = 0;
   let downY = 0;
   let moved = 0;
+  /** Whether this gesture ever had two fingers down. A pinch is not a tap, however little it moved. */
+  let pinched = false;
   const pointers = new Map<number, { x: number; y: number }>();
   let pinchDist = 0;
+
+  const stopFling = (): void => {
+    input.velX = 0;
+    input.velY = 0;
+  };
 
   const local = (e: PointerEvent | WheelEvent) => {
     const rect = canvas.getBoundingClientRect();
@@ -112,20 +131,29 @@ export function attachInput(
   );
 
   canvas.addEventListener('pointerdown', (e) => {
-    canvas.setPointerCapture(e.pointerId);
+    // Synthetic events have no active pointer to capture, and a throw here would abort the whole handler.
+    try {
+      canvas.setPointerCapture(e.pointerId);
+    } catch {
+      /* not capturable; the listeners below still see the events */
+    }
     const p = local(e);
     pointers.set(e.pointerId, p);
     if (pointers.size === 1) {
       input.dragging = true;
-      lastX = p.x;
-      lastY = p.y;
+      panFrom = { x: p.x, y: p.y };
       downX = p.x;
       downY = p.y;
       moved = 0;
-      input.velX = 0;
-      input.velY = 0;
+      pinched = false;
+      stopFling();
     } else if (pointers.size === 2) {
       pinchDist = spread(pointers);
+      pinched = true;
+      // No single-finger baseline is meaningful while two are down, and any leftover inertia from the
+      // one-finger drag that preceded this would keep sliding the view through the whole pinch.
+      panFrom = null;
+      stopFling();
     }
     wake();
   });
@@ -153,14 +181,25 @@ export function attachInput(
         input.zTarget = cam.z;
       }
       pinchDist = d;
+      pinched = true;
+      panFrom = null;
+      stopFling();
       wake();
       return;
     }
 
-    const dx = p.x - lastX;
-    const dy = p.y - lastY;
-    lastX = p.x;
-    lastY = p.y;
+    // No trusted baseline: this is the first move of a gesture, or the first after a pinch dropped to one
+    // finger. Take the current position as the baseline and pan from the NEXT move, rather than panning by
+    // however far the finger happens to be from a point that no longer means anything.
+    if (!panFrom) {
+      panFrom = { x: p.x, y: p.y };
+      wake();
+      return;
+    }
+
+    const dx = p.x - panFrom.x;
+    const dy = p.y - panFrom.y;
+    panFrom = { x: p.x, y: p.y };
     moved += Math.abs(dx) + Math.abs(dy);
     if (dx !== 0 || dy !== 0) input.onPan?.();
     panByScreen(cam, dx, dy);
@@ -185,10 +224,20 @@ export function attachInput(
   const release = (e: PointerEvent) => {
     pointers.delete(e.pointerId);
     if (pointers.size < 2) pinchDist = 0;
+    if (pointers.size === 1) {
+      // A pinch is ending but one finger is still down. Re-baseline from where that finger actually is,
+      // and drop any inertia, so lifting the other finger neither pans nor flings.
+      const rest = pointers.values().next().value;
+      panFrom = rest ? { x: rest.x, y: rest.y } : null;
+      stopFling();
+    }
     if (pointers.size === 0) {
       input.dragging = false;
+      panFrom = null;
+      // Lifting the last finger of a pinch must not fling the view either.
+      if (pinched) stopFling();
       const p = local(e);
-      const tapped = moved < 6 && Math.abs(p.x - downX) < 6 && Math.abs(p.y - downY) < 6;
+      const tapped = !pinched && moved < 6 && Math.abs(p.x - downX) < 6 && Math.abs(p.y - downY) < 6;
       if (tapped) {
         const now = performance.now();
         const second =
