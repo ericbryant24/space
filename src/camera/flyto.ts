@@ -1,7 +1,7 @@
 import type { Cell, Node } from '../universe/node.ts';
 import type { Tree } from '../universe/tree.ts';
 import { frameToNode, setNodeCoords, type Camera, type View } from './camera.ts';
-import { updateFocus } from './rebase.ts';
+import { childToParent, updateFocus } from './rebase.ts';
 
 /**
  * Eased travel between any two places in the universe.
@@ -54,8 +54,7 @@ export function positionInAncestor(
     const ref = tree.refOf(current);
     const parent = tree.parentOf(current);
     if (!ref || !parent) return null;
-    x = ref.ox + x * ref.rel;
-    y = ref.oy + y * ref.rel;
+    [x, y] = childToParent(ref, x, y);
     scale *= ref.rel;
     current = parent;
   }

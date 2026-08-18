@@ -1,260 +1,334 @@
-import { detailForScale, elevationAt, negated, sampleGrid, traceGrid, windowed } from '../../culture/terrain.ts';
-import { atLuminance, css, luminanceOf, type Hsl } from '../color.ts';
+import { RELIEF, detailForScale, groundAt, seaRadiusOf } from '../../culture/terrain.ts';
+import { atLuminance, css, luminanceOf, shade, type Hsl } from '../color.ts';
 import { outlineWidth } from '../bands.ts';
-import type { Ground, Node } from '../../universe/node.ts';
-import { surfaceColours, type Surface } from './planet.ts';
+import { groundHeightAt, seaHeightOf, type Ground, type Node } from '../../universe/node.ts';
+import { skyTone, surfaceColours, type Surface } from './planet.ts';
+import { drawStructures } from './houses.ts';
 
 /**
- * The ground: what a region looks like when it fills the screen.
+ * The ground, seen the way a two-dimensional creature would see it: edge on.
  *
- * A region used to be a coloured wash with nothing in it, which is the level the whole descent was building
- * towards and the emptiest thing in the project. What it draws now is a map of ITS OWN PATCH OF ITS OWN
- * PLANET -- the same `elevationAt` the planet's disc traces its coastline from, sampled over the small square
- * this region occupies, with the finer octaves that were invisible from orbit now switched on.
- *
- * So the promise holds in both directions: an ocean region is under water, an inland region is dry, and a
- * region that straddles a coast has the coast running through it in the right place and at the right angle.
- * Nothing is re-rolled locally, because there is nothing to re-roll -- there is one field.
+ * A region is a stretch of its planet's circumference, so its frame straddles the surface -- rock below, sky above,
+ * the ground line running across. That falls out of the geometry rather than being a chosen viewpoint, which is the
+ * whole appeal: there is no projection anywhere in the project, and a building at the bottom of the ladder is a
+ * front elevation because a front elevation is what a building IS from inside the plane.
  */
 
-/** Grid resolution for a plate's contours. Enough for a ragged coast, cheap enough to trace every frame. */
-const RESOLUTION = 72;
-/**
- * Where the plate's own edge is, in local units.
- *
- * The field does not stop at a region's boundary -- land simply continues -- so tracing it over a bare square
- * leaves rings hanging open at the edge, and an even-odd fill of open rings paints the wrong half. Drowning
- * everything past 1.03 closes every ring just outside the disc that gets drawn, where the artificial
- * coastline is clipped away and never seen.
- */
-const EDGE = 1.03;
+/** Most joints the ground line ever has. Scaled down with the plate, so a small plate costs little. */
+const LINE_SAMPLES = 220;
+
+/** Width of the ground line, in screen pixels, at every level. The one hero line of a surface view. */
+const GROUND_INK_PX = 2.4;
 
 /**
- * Contour steps, as fractions of the relief PRESENT IN THIS PLATE -- not of the planet's absolute height.
+ * How far past its own frame a plate draws, in frame radii.
  *
- * Absolute was the obvious reading and it drew nothing. The field is fractal, so the amplitude of the octaves
- * fine enough to vary across a thirty-kilometre patch is about a thousandth of the planet's full range: an
- * inland region sits at elevation 0.5 and varies by 0.001 across its whole width, so contours placed at a
- * third and two thirds of 0.5 fell nowhere near it and every region came out one flat colour. Banding the
- * local range is also what a topographic map does -- flat country still gets contours, they just stand for
- * smaller steps.
+ * A plate's slot is exactly one frame wide, so this small excess is only there to make sure neighbours overlap
+ * rather than leave a hairline of bare parent between them wherever floating point rounds the wrong way.
  */
-const BANDS = [0.3, 0.55, 0.8] as const;
-
-interface Plate {
-  readonly coast: readonly (readonly number[])[];
-  /** Contours above the water, innermost last. */
-  readonly bands: readonly (readonly (readonly number[])[])[];
-  /** Contours below it, deepest last. An open-ocean plate is a bathymetric chart, not a blue disc. */
-  readonly deeps: readonly (readonly (readonly number[])[])[];
-  /** Land as a fraction of the plate, for the all-land and all-sea cases where there is no coast to draw. */
-  readonly landFraction: number;
-}
+const OVERDRAW = 1.05;
 
 /**
- * Traced once per (node, zoom bucket) rather than every frame.
+ * Depths of the stratum lines, in FRAME RADII, at every level of the ladder.
  *
- * Three marching-squares sweeps at 72x72 is about fifteen thousand field samples, each of which walks up to
- * twenty octaves. That is affordable once and not sixty times a second. The key includes the detail level, so
- * descending re-traces with finer octaves exactly when the extra detail becomes visible.
+ * A fixed depth in local units, not a fixed thickness of planet -- and that is not a fudge, it is what the terrain
+ * field being self-similar means. The relief across a frame is the same fraction of that frame at every zoom (see
+ * PERSISTENCE in terrain.ts), so a fixed fraction of the frame IS a fixed multiple of the local relief. Measured in
+ * planet units instead, the strata sat two frame-radii below the ground at region zoom and a million below it at
+ * building zoom, which is why the rock came out one flat colour.
  */
-const plateCache = new Map<string, Plate>();
+const STRATA = [0.22, 0.55] as const;
 
-function plateOf(node: Node, frame: Ground, detail: number): Plate {
-  const key = `${node.id}:${detail}`;
-  const hit = plateCache.get(key);
-  if (hit) return hit;
+/**
+ * How thick a planet's living rind is: soil and water above, rock below, as a fraction of its radius.
+ *
+ * Shared with the renderer, and it has to be, because it is one half of a handover. A planet draws its own body
+ * until it is 1 / PLATE_RIND screens across, and past that its regions draw the ground instead -- so the rind the
+ * disc paints has to be exactly as deep as the rock a plate paints, or a dark band of interior appears or vanishes
+ * at the moment the handover happens. See PLANET_MAX_DIAGONALS in renderer.ts for the other half.
+ */
+export const PLATE_RIND = 0.16;
 
-  const elev = (u: number, v: number) =>
-    elevationAt(frame.planetId, frame.traits, frame.x + u * frame.span, frame.y + v * frame.span, detail);
-  /**
-   * The field as it is, and then a drowned copy for tracing.
-   *
-   * Kept separate because the relief STATISTICS have to come from the untouched field. Reading them off the
-   * windowed grid meant the artificial low values ringing the edge counted as the lowest ground in the plate,
-   * which dragged the contour thresholds below the real terrain and left the topmost band covering everything --
-   * an all-land region drew as a single flat colour.
-   */
-  const raw = sampleGrid(elev, RESOLUTION, EDGE * 1.03);
-  const up = windowed(raw, EDGE);
-  /**
-   * The same field upside down, so "deeper than" is just another "higher than" and needs no second sweep.
-   *
-   * NEGATE FIRST, THEN WINDOW. Windowing the up-grid and negating that flips the drowned edge into a raised
-   * one, which puts the exterior on the wrong side of every threshold and inverts the parity: the deepest band
-   * then enclosed almost the whole plate and an ocean region went uniformly dark.
-   */
-  const down = windowed(negated(raw), EDGE);
+/** Concentric steps down through a planet's interior. Three, because three flat steps read as depth. */
+const INTERIOR_BANDS = 3;
 
-  // The relief actually present in this plate, above and below the water, read off the grid we already have.
-  let lo = Infinity;
-  let hi = -Infinity;
-  let deepest = Infinity;
-  let shallow = -Infinity;
-  let land = 0;
-  let inside = 0;
-  const n = raw.n;
-  const stride = n + 1;
-  const cellStep = (2 * raw.extent) / n;
-  const originOffset = raw.extent;
-  for (let j = 0; j <= n; j++) {
-    const v = -originOffset + j * cellStep;
-    for (let i = 0; i <= n; i++) {
-      const u = -originOffset + i * cellStep;
-      if (u * u + v * v > 1) continue;
-      inside++;
-      const e = raw.v[j * stride + i]!;
-      if (e <= 0) {
-        if (e < deepest) deepest = e;
-        if (e > shallow) shallow = e;
-        continue;
-      }
-      land++;
-      if (e < lo) lo = e;
-      if (e > hi) hi = e;
-    }
+/** Trace the ground line across the plate, in local units, left to right. */
+function groundLine(g: Ground, detail: number, samples: number): Float64Array {
+  const out = new Float64Array(samples * 2);
+  for (let i = 0; i < samples; i++) {
+    const u = -OVERDRAW + (2 * OVERDRAW * i) / (samples - 1);
+    out[i * 2] = u;
+    out[i * 2 + 1] = groundHeightAt(g, u, detail);
   }
-  // Contours start at the shore where there is one, so the lowest band is the coastal strip.
-  const base = land > 0 && land < inside ? 0 : Math.max(0, lo);
-  const range = land > 0 ? hi - base : 0;
-  /**
-   * Depth is measured over the range PRESENT HERE, from the shallowest water in view to the deepest -- the same
-   * local-range argument the land contours needed, and I got it wrong here first: banding at fractions of the
-   * absolute depth put every threshold far below a patch of sea floor that varies by a thousandth, so the
-   * deepest band swallowed the whole plate and an ocean region drew as one flat colour again, only darker.
-   */
-  const seaBase = land < inside ? shallow : 0;
-  const depth = land < inside ? seaBase - deepest : 0;
-
-  const plate: Plate = {
-    coast: traceGrid(up),
-    bands: range > 1e-12 ? BANDS.map((f) => traceGrid(up, base + range * f)) : [],
-    // Negated grid, negated threshold: the level set is the same curve, and the parity now anchors on deep
-    // water outside every ring rather than on shallow.
-    deeps: depth > 1e-12 ? BANDS.map((f) => traceGrid(down, -(seaBase - depth * f))) : [],
-    landFraction: inside > 0 ? land / inside : 0,
-  };
-  if (plateCache.size > 24) plateCache.clear();
-  plateCache.set(key, plate);
-  return plate;
-}
-
-function fillRings(
-  ctx: CanvasRenderingContext2D,
-  rings: readonly (readonly number[])[],
-  cx: number,
-  cy: number,
-  r: number,
-): boolean {
-  if (rings.length === 0) return false;
-  ctx.beginPath();
-  for (const ring of rings) {
-    for (let i = 0; i < ring.length; i += 2) {
-      const px = cx + ring[i]! * r;
-      const py = cy + ring[i + 1]! * r;
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-  }
-  return true;
+  return out;
 }
 
 /**
- * A region, as a top-down plate.
+ * A region, settlement or building plate: the surface seen edge on.
  *
- * Flat contour bands, never a gradient heightmap: three steps of one colour ramp read as height instantly and
- * stay in the house style, where a smooth ramp would read as a render that did not quite work.
+ * `reachPx` is how far above and below the ground the plate paints, in SCREEN PIXELS -- the frame's diagonal, so one
+ * plate covers the screen if it has to. Pixels rather than frame radii because a plate has to cover the whole height
+ * of the column it owns whatever its own width: measured in radii, a settlement eight pixels across painted a
+ * hundred-pixel sliver of its own sky into the middle of its region's ground, and a region came out a comb of
+ * vertical spikes.
+ *
+ * NOTHING HERE IS BOUNDED BY A RECTANGLE, and that is the whole trick to tiling these without seams.
+ *
+ * Plates meet edge to edge, hundreds of them across a screen, and three earlier schemes each left a faint vertical
+ * rule at every boundary -- one pixel wide, about seven percent contrast, easy to look straight past in a screenshot
+ * and impossible to unsee afterwards. Clipping to a strip puts a column of half-covered fill at every shared edge.
+ * Overlapping with no clip is worse: a plate paints its layers in order, so its soil polygon's vertical side edge
+ * was antialiased against its OWN rock beneath, and since a later plate paints over an earlier one, every plate
+ * stamped that hairline into its neighbour's finished ground. An integer-aligned clip cures the antialiasing but
+ * only for an axis-aligned rectangle, and these plates are ROTATED -- a plate's "up" is the direction away from the
+ * planet's centre, which differs from its neighbour's.
+ *
+ * What works is to bound every fill by the GROUND LINE rather than by a rectangle. Then a fill's side edges only
+ * ever fall where the neighbouring plate painted the same colour -- sky beside sky, rock beside rock -- because both
+ * plates read the same terrain field at the angle where they meet. Antialiasing between two identical colours is
+ * invisible, so there is nothing left to see and no clip is needed at all. `tools/seam-check.ts` guards it.
  */
-export function drawRegion(
+export function drawSurfacePlate(
   ctx: CanvasRenderingContext2D,
   cx: number,
   cy: number,
   r: number,
   node: Node,
+  reachPx: number,
 ): void {
-  const frame = node.ground;
-  if (!frame) return;
-  const s = surfaceColours(frame.traits);
-  const detail = Math.round(detailForScale(r / frame.span));
-  const plate = plateOf(node, frame, detail);
+  const g = node.ground;
+  if (!g) return;
+  const s = surfaceColours(g.traits);
+  const detail = Math.round(detailForScale((r / g.span) * 2));
 
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
+  // Screen y runs down; local y runs OUTWARD from the planet, so up on screen is away from its centre.
+  const toX = (u: number) => cx + u * r;
+  const toY = (v: number) => cy - v * r;
+  const reach = reachPx / Math.max(1e-9, r);
 
-  // Water first, always. The plate is windowed so that outside every ring is water, which makes this the base
-  // in every case -- all-land plates get one ring around the whole thing, all-sea plates get none.
-  ctx.fillStyle = css(s.sea);
-  ctx.fillRect(cx - r, cy - r, r * 2, r * 2);
+  const samples = Math.max(16, Math.min(LINE_SAMPLES, Math.round(r)));
+  const line = groundLine(g, detail, samples);
 
   /**
-   * Bathymetry, before anything else, because it sits under the shore.
+   * The water line, clamped to what the plate can paint.
    *
-   * Water used to get no contours at all, which meant a region out in open ocean -- and plenty are -- drew as
-   * one flat blue disc with nothing in it. The sea floor has relief for the same reason the land does; it is
-   * the same field.
+   * Unclamped it is unbounded: the sea's depth in LOCAL units grows by the frame's own scale factor at every rung,
+   * so at building zoom an ocean floor is tens of thousands of frame radii below the surface. A true number, and not
+   * one to hand to a path.
    */
-  const seaFloor = Math.max(0.03, luminanceOf(s.sea) - 0.16);
-  for (let b = 0; b < plate.deeps.length; b++) {
-    if (!fillRings(ctx, plate.deeps[b]!, cx, cy, r)) continue;
-    const t = (b + 1) / plate.deeps.length;
-    ctx.fillStyle = css(atLuminance(s.sea, luminanceOf(s.sea) + (seaFloor - luminanceOf(s.sea)) * t));
-    ctx.fill('evenodd');
-  }
+  const sea = Math.min(reach, seaHeightOf(g));
+  let lowest = Infinity;
+  for (let i = 0; i < samples; i++) lowest = Math.min(lowest, line[i * 2 + 1]!);
+  const wet = sea > lowest;
 
-  // Land, then each contour step a little lighter, so height reads without a single gradient.
-  if (fillRings(ctx, plate.coast, cx, cy, r)) {
-    ctx.fillStyle = css(s.land);
-    ctx.fill('evenodd');
-  }
+  /** A path bounded above by the ground line and below by the plate's reach: everything solid. */
+  const rockPath = (): void => {
+    ctx.beginPath();
+    ctx.moveTo(toX(-OVERDRAW), toY(-reach));
+    for (let i = 0; i < samples; i++) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]!));
+    ctx.lineTo(toX(OVERDRAW), toY(-reach));
+    ctx.closePath();
+  };
+
   /**
-   * A wide ramp, not a polite one. Three steps over a tenth of a luminance is invisible on a saturated hue --
-   * the first version of this was yellow-on-yellow and read as one flat colour with some stray ink on it.
-   * High ground also loses saturation towards bare rock, which is both what happens and what makes the top
-   * band separate from the bottom at a glance.
+   * 1. Sky, down to the top of whatever is solid or liquid.
+   *
+   * A plate paints sky rather than leaving it, and has to: its parent painted the same ground at a coarser detail
+   * level, and wherever the fine ground is lower than the coarse ground the parent's rock is standing in mid-air.
+   * This is what erases it. Bounding it by the surface rather than filling a rectangle is what keeps its edges
+   * invisible.
    */
-  const lowest = Math.max(0.06, luminanceOf(s.land) - 0.08);
-  const highest = Math.min(0.9, luminanceOf(s.land) + 0.42);
-  for (let b = 0; b < plate.bands.length; b++) {
-    const rings = plate.bands[b]!;
-    if (!fillRings(ctx, rings, cx, cy, r)) continue;
-    const t = (b + 1) / plate.bands.length;
-    ctx.fillStyle = css(step(s.land, lowest + (highest - lowest) * t, 1 - t * 0.45));
-    ctx.fill('evenodd');
+  ctx.beginPath();
+  ctx.moveTo(toX(-OVERDRAW), toY(reach));
+  for (let i = 0; i < samples; i++) {
+    ctx.lineTo(toX(line[i * 2]!), toY(Math.max(line[i * 2 + 1]!, wet ? sea : -reach)));
   }
+  ctx.lineTo(toX(OVERDRAW), toY(reach));
+  ctx.closePath();
+  ctx.fillStyle = css(skyTone(g.traits));
+  ctx.fill();
 
-  // The coast in ink. Heavier than the contours, because it is the one line that separates two materials
-  // rather than two heights.
-  const w = outlineWidth(r, 2.4);
-  if (w > 0 && plate.coast.length > 0) {
-    fillRings(ctx, plate.coast, cx, cy, r);
-    ctx.lineWidth = w;
-    ctx.strokeStyle = css(s.coast, 0.9);
+  // 2. Rock, below the ground.
+  rockPath();
+  ctx.fillStyle = css(s.land);
+  ctx.fill();
+
+  /**
+   * 3. Strata, as LINES parallel to the surface rather than filled bands.
+   *
+   * Depth is the one thing the inside of a two-dimensional world has to say, and layers say it instantly. Lines
+   * rather than fills for the seam reason above -- a stroke has no vertical side edges to antialias -- and each
+   * plate repaints its rock before drawing them, so a child's finer layering replaces its parent's coarser layering
+   * cleanly instead of the two showing at once.
+   */
+  ctx.lineWidth = GROUND_INK_PX * 0.8;
+  for (let b = 0; b < STRATA.length; b++) {
+    const drop = STRATA[b]!;
+    ctx.beginPath();
+    for (let i = 0; i < samples; i++) {
+      const px = toX(line[i * 2]!);
+      const py = toY(line[i * 2 + 1]! - drop);
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    const t = (b + 1) / STRATA.length;
+    ctx.strokeStyle = css(
+      atLuminance({ ...s.land, s: s.land.s * (1 - t * 0.3) }, Math.max(0.05, luminanceOf(s.land) * (1 - t * 0.45))),
+    );
     ctx.stroke();
-    // Contours at half weight: present, and plainly subordinate to the coastline.
-    ctx.lineWidth = w * 0.5;
-    ctx.strokeStyle = css(s.coast, 0.4);
-    for (const rings of plate.bands) {
-      if (fillRings(ctx, rings, cx, cy, r)) ctx.stroke();
-    }
-  }
-  // Depth contours are inked even with no shore in view, which is the whole point for an ocean plate.
-  if (w > 0 && plate.deeps.length > 0) {
-    ctx.lineWidth = w * 0.45;
-    ctx.strokeStyle = css(s.coast, 0.3);
-    for (const rings of plate.deeps) {
-      if (fillRings(ctx, rings, cx, cy, r)) ctx.stroke();
-    }
   }
 
-  ctx.restore();
+  /**
+   * 4. Water: the gap ABOVE the ground and below the water line.
+   *
+   * Bounded below by `min(sea, ground)`, which is the ground where the ground is submerged and the water line itself
+   * where it is not -- so the polygon collapses to nothing over dry land. A dry world needs no special case, and a
+   * coast is simply where the shape runs out. Flat and opaque, like every fill in the project.
+   */
+  if (wet) {
+    ctx.beginPath();
+    ctx.moveTo(toX(-OVERDRAW), toY(sea));
+    ctx.lineTo(toX(OVERDRAW), toY(sea));
+    for (let i = samples - 1; i >= 0; i--) {
+      ctx.lineTo(toX(line[i * 2]!), toY(Math.min(sea, line[i * 2 + 1]!)));
+    }
+    ctx.closePath();
+    ctx.fillStyle = css(s.sea);
+    ctx.fill();
+  }
+
+  /**
+   * 5. The surface in ink, at a FIXED screen width.
+   *
+   * Not `outlineWidth(r, ...)`. That helper fades an object's outline out as the object gets small and returns zero
+   * under about six pixels, which is right for a moon and wrong here, because a plate is not an object, it is a
+   * window onto the ground. Sized from the plate, the ink vanished the moment settlements took over the painting,
+   * and the coastline disappeared from the world.
+   */
+  ctx.beginPath();
+  for (let i = 0; i < samples; i++) {
+    const px = toX(line[i * 2]!);
+    const py = toY(line[i * 2 + 1]!);
+    if (i === 0) ctx.moveTo(px, py);
+    else ctx.lineTo(px, py);
+  }
+  ctx.lineWidth = GROUND_INK_PX;
+  ctx.strokeStyle = css(s.coast);
+  ctx.stroke();
+
+  // 6. What is built here, standing out of the ground. Drawn before the water line, so a jetty's shore still reads.
+  drawStructures(ctx, cx, cy, r, node, detail);
+
+  // And the top of the water, lighter, in the runs where there IS water. A line drawn straight across would be the
+  // sea LEVEL, which is a fact about the planet rather than something you can see from the beach.
+  if (wet) {
+    ctx.beginPath();
+    let open = false;
+    for (let i = 0; i < samples; i++) {
+      const under = line[i * 2 + 1]! < sea;
+      if (under && !open) {
+        ctx.moveTo(toX(line[i * 2]!), toY(sea));
+        open = true;
+      } else if (under) {
+        ctx.lineTo(toX(line[i * 2]!), toY(sea));
+      } else {
+        open = false;
+      }
+    }
+    ctx.lineWidth = GROUND_INK_PX * 0.7;
+    ctx.strokeStyle = css(atLuminance(s.sea, Math.min(0.9, luminanceOf(s.sea) + 0.22)));
+    ctx.stroke();
+  }
 }
 
-/** A tone at a given luminance, with saturation scaled -- high ground reads as rock rather than bright paint. */
-function step(base: Hsl, targetLuminance: number, saturation: number): Hsl {
-  return atLuminance({ ...base, s: base.s * saturation }, targetLuminance);
+/**
+ * A planet: a disc of rock with everything that matters happening on its edge.
+ *
+ * A thin bright rind of soil and water at the circumference, a dark interior in concentric steps, and the surface
+ * itself as a wiggly closed curve at `groundAt(theta)` with water filling every dip below the sea radius. What used
+ * to be here was a world map -- continents laid across the face of the disc, which is a flattened picture of a round
+ * planet rather than a genuinely flat one.
+ *
+ * The value ramp is the point. Life happens in the rind, and the eye goes to the brightest thing on screen, so a
+ * mid-toned interior with rings in it turns a planet into a target painted on a wall -- which is exactly what the
+ * first version of this looked like. At a quarter of the land's luminance the coast is the one bright edge in the
+ * picture, and depth still reads, because flat steps read as depth at any contrast at all.
+ */
+export function drawPlanetBody(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  id: number,
+  traits: Parameters<typeof surfaceColours>[0],
+): void {
+  const s = surfaceColours(traits);
+  const seaR = seaRadiusOf(id, traits);
+  const detail = Math.round(detailForScale(r));
+  const samples = Math.max(96, Math.min(1400, Math.round(r * 1.6)));
+  // Deep enough that the deepest sea bed still has rock under it, and set to match what a region plate paints, so
+  // the handover from disc to plates changes nothing about how thick the living world is. See PLATE_RIND.
+  const crust = Math.min(1 - RELIEF * 0.7, 1 - PLATE_RIND);
+
+  const surfaceCurve = (): void => {
+    ctx.beginPath();
+    for (let i = 0; i <= samples; i++) {
+      const theta = (i / samples) * Math.PI * 2;
+      const rad = groundAt(id, traits, theta, detail) * r;
+      const px = cx + Math.cos(theta) * rad;
+      const py = cy + Math.sin(theta) * rad;
+      if (i === 0) ctx.moveTo(px, py);
+      else ctx.lineTo(px, py);
+    }
+    ctx.closePath();
+  };
+
+  // 1. The ocean, as a disc out to the water line. Land stands out of it where the ground is higher.
+  ctx.fillStyle = css(s.sea);
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * seaR, 0, Math.PI * 2);
+  ctx.fill();
+
+  // 2. The land: one closed curve at the ground radius.
+  surfaceCurve();
+  ctx.fillStyle = css(s.land);
+  ctx.fill();
+
+  // 3. The interior, drawn OVER the land so the coast stays a thin rind rather than the whole disc being one colour.
+  for (let b = 0; b < INTERIOR_BANDS; b++) {
+    const t = b / (INTERIOR_BANDS - 1);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * crust * (1 - (b / INTERIOR_BANDS) * 0.78), 0, Math.PI * 2);
+    ctx.fillStyle = css(
+      atLuminance(
+        { ...s.land, s: s.land.s * (0.7 - t * 0.32) },
+        Math.max(0.035, luminanceOf(s.land) * (0.3 - t * 0.2)),
+      ),
+    );
+    ctx.fill();
+  }
+  // A core, in the star's own shadow hue: the one warm thing in a cold interior, and the only thing the middle of a
+  // two-dimensional world has to say for itself.
+  ctx.beginPath();
+  ctx.arc(cx, cy, r * crust * 0.13, 0, Math.PI * 2);
+  ctx.fillStyle = css(atLuminance(shade(s.land, traits.starLight.shadowHue, 1.4), 0.15));
+  ctx.fill();
+
+  // 4. The surface in ink, over everything, because it is the edge of the world.
+  const w = outlineWidth(r, 3);
+  if (w > 0) {
+    surfaceCurve();
+    ctx.lineWidth = w;
+    ctx.strokeStyle = css(s.coast);
+    ctx.stroke();
+
+    // And the water line, lighter, so a shore reads as a shore.
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * seaR, 0, Math.PI * 2);
+    ctx.lineWidth = w * 0.5;
+    ctx.strokeStyle = css(atLuminance(s.sea, Math.min(0.9, luminanceOf(s.sea) + 0.2)));
+    ctx.stroke();
+  }
 }
 
 export type { Surface };

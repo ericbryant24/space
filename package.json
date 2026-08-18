@@ -13,7 +13,10 @@
     "perf": "node tools/perf.ts",
     "nav": "node tools/nav-check.ts",
     "real": "node tools/real-check.ts",
-    "worlds": "node tools/worlds.ts"
+    "worlds": "node tools/worlds.ts",
+    "relief": "node tools/relief.ts",
+    "seams": "node tools/seam-check.ts",
+    "marks": "node tools/marks-check.ts"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",

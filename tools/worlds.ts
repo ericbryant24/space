@@ -68,6 +68,15 @@ async function descendTo(page: Page, kind: string, aim: readonly [number, number
   return false;
 }
 
+const SURFACE = new Set(['region', 'settlement', 'building']);
+
+/** Step along the rim until the ground under the camera is somewhere people live. See `__seekInhabited`. */
+const seekInhabited = (page: Page, tries: number): Promise<boolean> =>
+  page.evaluate(
+    (n: number) => (window as unknown as { __seekInhabited(l: number): boolean }).__seekInhabited(n),
+    tries,
+  );
+
 /** Offsets applied at galaxy level, so each run falls through a different arm and finds a different world. */
 const AIM: readonly (readonly [number, number])[] = [
   [0, 0],
@@ -131,8 +140,32 @@ const main = async () => {
       }
     }
 
+    /**
+     * Find DRY GROUND before going any deeper.
+     *
+     * Diving straight down lands wherever the geometry puts it, and most of most worlds is ocean -- so the first
+     * surface shots this printed were all sea bed under deep water: an honest picture of a real place, and useless
+     * for reviewing the art. Sought at REGION level, because one step there is a whole region and one step at
+     * building level is sixteen metres, which will not cross an ocean before the loop gives up.
+     */
+    if (SURFACE.has(LEVEL)) {
+      if (!(await descendTo(page, 'region', AIM[attempt]!))) {
+        console.log(`  aim ${attempt}: never reached a region`);
+        continue;
+      }
+      if (!(await seekInhabited(page, 200))) {
+        console.log(`  aim ${attempt}: nothing but ocean along that rim`);
+        continue;
+      }
+    }
+
     if (!(await descendTo(page, LEVEL, AIM[attempt]!))) {
       console.log(`  aim ${attempt}: never reached ${LEVEL}`);
+      continue;
+    }
+    // On land now, so this only has to satisfy the level's own inhabited roll: a few slots, not a few hundred.
+    if (SURFACE.has(LEVEL) && !(await seekInhabited(page, 60))) {
+      console.log(`  aim ${attempt}: no one lives along that stretch`);
       continue;
     }
     await settle(page, 18);

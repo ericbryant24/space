@@ -6,19 +6,29 @@ import { setSimTime } from './core/clock.ts';
 import { startLoop } from './core/loop.ts';
 import { attachInput, createInput, stepInput } from './input/pointer.ts';
 import {
-  displayName,
   drawHover,
   drawLock,
   hitTest,
-  hoverLabel,
   render,
   scatterHitAt,
   setRecordAllHits,
   type HitEntry,
 } from './render/renderer.ts';
-import { childNear, childrenNear, type Cell } from './universe/node.ts';
+import {
+  childNear,
+  childrenNear,
+  groundHeightAt,
+  isInhabited,
+  makeChild,
+  rimChild,
+  rimChildren,
+  seaHeightOf,
+  type Cell,
+} from './universe/node.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
+import { houseCount } from './render/draw/houses.ts';
+import { createBookmarks } from './ui/bookmarks.ts';
 import { createHud } from './ui/hud.ts';
 import { DEFAULT_SEED, Router, stateOf, type CameraState } from './ui/router.ts';
 
@@ -86,6 +96,43 @@ const tree = new Tree(seed);
 const cam = createCamera(tree.root, ROOT_Z);
 const input = createInput(cam);
 const hud = createHud(overlay, tree, (depth) => flyToDepth(depth));
+
+/**
+ * Places you kept, as pictures.
+ *
+ * The thumbnail is taken from the live canvas at the moment you keep the view, downscaled to a tile -- so the tile
+ * IS the place as you saw it, which is a better name for it than the generator could write. This is what replaced
+ * every word on the screen: the labels were doing two jobs, and this is the one of them a drawing cannot do.
+ */
+const bookmarks = createBookmarks(
+  overlay,
+  (state) => {
+    flight = null;
+    tracked = null;
+    applyState(state);
+    router.push(stateOf(cam, seed));
+    loop.wake();
+  },
+  () => thumbnail(),
+  () => stateOf(cam, seed),
+);
+
+/** The current view, small enough to keep in local storage: a few kilobytes of JPEG. */
+function thumbnail(): string {
+  const w = 116;
+  const h = 80;
+  const tile = document.createElement('canvas');
+  tile.width = w;
+  tile.height = h;
+  const tctx = tile.getContext('2d');
+  if (!tctx) return '';
+  // Cover rather than stretch: a squashed thumbnail of a landscape is unrecognisable, which defeats the point.
+  const scale = Math.max(w / canvas.width, h / canvas.height);
+  const dw = canvas.width * scale;
+  const dh = canvas.height * scale;
+  tctx.drawImage(canvas, (w - dw) / 2, (h - dh) / 2, dw, dh);
+  return tile.toDataURL('image/jpeg', 0.72);
+}
 
 applyState(initial);
 
@@ -233,15 +280,14 @@ const loop = startLoop((dt) => {
   if (tracked) {
     const at = pick(view.w / 2, view.h / 2);
     const node = tree.resolve(tracked);
-    if (at && node && samePath(at.path, tracked)) drawLock(ctx, at, displayName(node, tree));
+    if (at && node && samePath(at.path, tracked)) drawLock(ctx, at);
   }
 
   // Reticle under the cursor, so it is visible that things can be travelled to at all.
   if (!flight && !input.dragging) {
     const hovered = pick(input.hoverX, input.hoverY);
     if (hovered && hovered.path.length > cam.node.path.length) {
-      const node = tree.resolve(hovered.path);
-      if (node) drawHover(ctx, hovered, hoverLabel(node, tree), performance.now() / 1000);
+      drawHover(ctx, hovered, performance.now() / 1000);
       canvas.style.cursor = 'pointer';
     } else {
       canvas.style.cursor = 'crosshair';
@@ -299,11 +345,28 @@ input.onDoubleClick = (x, y) => {
  */
 function pick(x: number, y: number): HitEntry | null {
   const hit = scatterHitAt(cam, view, x, y) ?? hitTest(lastHits, x, y);
-  // The focus node and its ancestors fill most of the screen, so they win almost every pick made in the
-  // empty space between their children. Travelling to where you already are is a two-second flight that
-  // lands exactly where it started, which reads as the click having gone wrong. Backspace rises instead.
-  if (hit && hit.path.length <= cam.node.path.length) return null;
+  /**
+   * The focus node and its ANCESTORS are not targets: they fill most of the screen, so they win almost every pick
+   * made in the empty space between their children, and travelling to where you already are is a two-second flight
+   * that lands exactly where it started -- which reads as the click having gone wrong. Backspace rises instead.
+   *
+   * SIBLINGS are targets, and testing depth alone excluded them. That was harmless while a focus node's own disc
+   * was the picture, and wrong the moment the surface arrived: below a planet the ground either side of you is a
+   * row of sibling plates, and being unable to double-click the next stretch of coast is being unable to walk.
+   */
+  if (hit && isSelfOrAncestor(hit.path)) return null;
   return hit;
+}
+
+/** Whether a path is the camera's own node or one of its ancestors -- that is, a prefix of the camera's path. */
+function isSelfOrAncestor(path: readonly Cell[]): boolean {
+  if (path.length > cam.node.path.length) return false;
+  for (let i = 0; i < path.length; i++) {
+    const a = path[i]!;
+    const b = cam.node.path[i]!;
+    if (a.cx !== b.cx || a.cy !== b.cy) return false;
+  }
+  return true;
 }
 
 /**
@@ -451,6 +514,10 @@ window.addEventListener('keydown', (e) => {
     case ' ':
       motion = !motion;
       break;
+    case 'b':
+      // Keep this view. The one keyboard verb the wordless chrome has, and the rail's plus tile does the same.
+      bookmarks.add(stateOf(cam, seed), thumbnail());
+      break;
     case '`':
       // The numbers, for whoever is working on the renderer rather than looking at the universe.
       hud.setDebug(!hud.debugVisible());
@@ -535,6 +602,47 @@ function diveStep(dz = 0.5): void {
 Object.assign(window as unknown as Record<string, unknown>, {
   __cam: cam,
   __tree: tree,
+  __rimChildren: rimChildren,
+  __houses: () => houseCount(),
+  __isInhabited: isInhabited,
+  __makeChild: makeChild,
+  /**
+   * Step sideways along the rim, slot by slot, until the ground under the camera is somewhere people live.
+   *
+   * For the review harness. Diving straight down lands wherever the geometry puts it, and most of most worlds is
+   * ocean, so every surface screenshot came back as sea bed under deep water -- an honest picture of a real place and
+   * useless for looking at buildings. Nudging `fx` does not work: the camera can sit outside its own focus node
+   * without `updateFocus` doing anything about it, so the focus never changes and the search never moves. This
+   * rebases properly, one slot per step, landing at the neighbour's centre.
+   */
+  __seekInhabited: (limit = 800): boolean => {
+    // Waking is not optional. Teleporting the camera without it leaves the render loop asleep, so the next
+    // screenshot is the frame from BEFORE the jump -- which read as houses drawn in the wrong place.
+    loop.wake();
+    for (let i = 0; i < limit; i++) {
+      if (isInhabited(cam.node)) return true;
+      const parent = tree.parentOf(cam.node);
+      const ref = tree.refOf(cam.node);
+      if (!parent || !ref) return false;
+      const next = rimChild(parent, ref.cell.cx + 1);
+      if (!next) return false;
+      cam.node = makeChild(parent, next);
+      cam.k = 0;
+      cam.cx = 0;
+      cam.cy = 0;
+      cam.fx = 0;
+      cam.fy = 0;
+    }
+    return isInhabited(cam.node);
+  },
+  /** The focus node's ground line sampled across its own frame, plus its water line. Debug only. */
+  __plate: () => {
+    const g = cam.node.ground;
+    if (!g) return null;
+    const line: number[] = [];
+    for (let i = 0; i <= 8; i++) line.push(groundHeightAt(g, -1 + i / 4, 16));
+    return { theta: g.theta, span: g.span, baseRadius: g.baseRadius, sea: seaHeightOf(g), line };
+  },
   __loop: loop,
   __input: input,
   __diveStep: diveStep,

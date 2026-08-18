@@ -2,9 +2,9 @@ import { simTime } from '../core/clock.ts';
 import { f01, fSym, hash, hash2, hash3, hash4, mix, roll } from '../core/rng.ts';
 import { armDensity, galaxyShape } from './gen/galaxyShape.ts';
 import { orbitRadius } from './orbits.ts';
-import { LEVELS, ROOT_KIND, anchorLevel, type Kind } from './schema.ts';
+import { KIND_ORDER, LEVELS, ROOT_KIND, anchorLevel, type Kind } from './schema.ts';
 import { planetTraits, type PlanetTraits } from './gen/planet.ts';
-import { PLACEMENT_DETAIL, elevationAt } from '../culture/terrain.ts';
+import { PLACEMENT_DETAIL, groundAt, seaRadiusOf } from '../culture/terrain.ts';
 
 export { orbitRadius };
 
@@ -37,11 +37,43 @@ export interface Node {
 export interface Ground {
   readonly planetId: number;
   readonly traits: PlanetTraits;
-  /** Centre in planet units, where the planet's disc is the unit circle. */
-  readonly x: number;
-  readonly y: number;
-  /** Radius in planet units. One of this node's own units is this many planet units. */
+  /**
+   * Angle around the planet's circumference where this node's centre sits. Meaningless for the planet itself,
+   * which IS the circle.
+   */
+  readonly theta: number;
+  /** Radius in planet units. One of this node's own local units is this many planet units. */
   readonly span: number;
+  /**
+   * Radius, in planet units, that this node's local origin sits at -- so a region straddles the ground line
+   * rather than hovering over it. Zero for the planet, whose origin is its centre.
+   *
+   * Stored rather than recomputed, and computed at PLACEMENT_DETAIL, so that the frame a settlement is placed
+   * in is the same frame the painter draws the ground line in. Recomputing it at the current zoom would drift
+   * the two apart and float every building off the surface.
+   */
+  readonly baseRadius: number;
+}
+
+/**
+ * The angle of a point at local horizontal offset `u` within a node's frame.
+ *
+ * Below the planet the arc is short enough to treat as straight -- a region spans a two-hundred-and-fiftieth of
+ * the circumference -- so local horizontal is arc length, and dividing by the radius converts it to an angle.
+ */
+export function angleAtOffset(g: Ground, u: number): number {
+  return g.theta + (u * g.span) / Math.max(1e-9, g.baseRadius);
+}
+
+/** Where the ground line crosses this node's frame, in local units, at local horizontal offset `u`. */
+export function groundHeightAt(g: Ground, u: number, detail: number): number {
+  const r = groundAt(g.planetId, g.traits, angleAtOffset(g, u), detail);
+  return (r - g.baseRadius) / g.span;
+}
+
+/** Where the water line crosses this node's frame, in local units. Below the ground line means dry. */
+export function seaHeightOf(g: Ground): number {
+  return (seaRadiusOf(g.planetId, g.traits) - g.baseRadius) / g.span;
 }
 
 /**
@@ -57,6 +89,21 @@ export interface ChildRef {
   readonly ox: number;
   readonly oy: number;
   readonly rel: number;
+  /**
+   * Rotation, in radians, from the child's own frame into its parent's. Zero everywhere except below a planet.
+   *
+   * THIS IS THE ONE PLACE THE PROJECT HAS A ROTATION, and it is not decoration: on a two-dimensional world the
+   * surface is the planet's circumference, so a region's "up" is the direction away from the planet's centre --
+   * which points somewhere different for every region. Without this, a region on the left of a planet was drawn
+   * with its ground line horizontal while its frame sat on a vertical stretch of rim, so plates met at angles
+   * and the ground broke at every seam.
+   *
+   * It composes exactly like `ox`/`oy`/`rel` do, through `enterChild` and `ascend` and the renderer's climb, so
+   * entering a region and leaving it again lands the camera precisely where it started and the whole scene turns
+   * with it. Rotation is also the one transform that leaves screen-space line widths alone, which is why it can
+   * be handed to the canvas without breaking the art direction.
+   */
+  readonly spin: number;
 }
 
 export function rootNode(seed: number): Node {
@@ -83,6 +130,10 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   if (level.placement === 'scatter') {
     if (cell.cy !== 0) return null;
     return scatterChild(node, cell.cx);
+  }
+  if (level.placement === 'rim') {
+    if (cell.cy !== 0) return null;
+    return rimChild(node, cell.cx);
   }
 
   const k = anchorLevel(node.kind);
@@ -115,24 +166,6 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   const edge = 1 - dist;
   if (edge < 0.12 && f01(hash2(id, 0x05)) > edge / 0.12) return null;
 
-  /**
-   * ON A PLANET, THINGS ARE BUILT ON LAND.
-   *
-   * Placement below a planet consults the same terrain field the surface is drawn from, so a settlement cannot
-   * sit in open ocean and a building cannot stand in the sea -- which some of them plainly did, floating over
-   * a bathymetric chart with nothing under them. It is the same argument as stars belonging in a galaxy's arms:
-   * a thing in a place the art draws as empty is a lie, whichever direction the lie runs in.
-   *
-   * The detail level is FIXED rather than taken from the zoom. Placement has to be a pure function of address
-   * or a settlement would blink in and out as you approached, and every permalink to one would be a coin toss.
-   */
-  if (node.ground && (kind === 'settlement' || kind === 'building')) {
-    const g = node.ground;
-    const px = g.x + ox * g.span;
-    const py = g.y + oy * g.span;
-    if (elevationAt(g.planetId, g.traits, px, py, PLACEMENT_DETAIL) <= 0) return null;
-  }
-
   // Inside a galaxy, stars exist where the galaxy is luminous. Uniform placement put real systems in
   // regions the art draws as empty -- the mirror image of scattering decorative dots that correspond
   // to nothing, and just as much of a lie.
@@ -145,7 +178,7 @@ export function childAt(node: Node, cell: Cell): ChildRef | null {
   // across its whole iteration for speed, and retaining it aliased every child's path to whichever
   // cell the loop last touched -- which silently corrupted node cache keys and made click-to-fly
   // resolve to an empty cell and do nothing.
-  return { cell: { cx: cell.cx, cy: cell.cy }, id, kind, logSpan, ox, oy, rel };
+  return { cell: { cx: cell.cx, cy: cell.cy }, id, kind, logSpan, ox, oy, rel, spin: 0 };
 }
 
 export function makeChild(parent: Node, ref: ChildRef): Node {
@@ -172,19 +205,22 @@ function groundFor(parent: Node, ref: ChildRef): Ground | null {
     return {
       planetId: ref.id,
       traits: planetTraits(ref.id, parent.id, index, count),
-      x: 0,
-      y: 0,
+      theta: 0,
       span: 1,
+      // A planet's local origin is its own centre, which on a 2D world is the one place nothing lives.
+      baseRadius: 0,
     };
   }
   const g = parent.ground;
   if (!g) return null;
+  const theta = parent.kind === 'planet' ? Math.atan2(ref.oy, ref.ox) : angleAtOffset(g, ref.ox);
   return {
     planetId: g.planetId,
     traits: g.traits,
-    x: g.x + ref.ox * g.span,
-    y: g.y + ref.oy * g.span,
+    theta,
     span: g.span * ref.rel,
+    // The child's origin sits on the ground line, which is where `rimChild` put it.
+    baseRadius: groundAt(g.planetId, g.traits, theta, PLACEMENT_DETAIL),
   };
 }
 
@@ -256,6 +292,7 @@ export function orbitalChild(node: Node, index: number): ChildRef | null {
     ox: Math.cos(angle) * radius,
     oy: Math.sin(angle) * radius,
     rel,
+    spin: 0,
   };
 }
 
@@ -268,6 +305,163 @@ export function orbitalChildren(node: Node): ChildRef[] {
     if (ref) out.push(ref);
   }
   return out;
+}
+
+/**
+ * RIM PLACEMENT: children stand ON their parent's surface.
+ *
+ * A two-dimensional planet is a disc of rock whose surface is its circumference, so its children are arcs of
+ * that circumference rather than patches of its face -- and below the planet the frame has already been turned
+ * edge on, so a child is a stretch of the ground line running left to right across it. Both are the same
+ * one-dimensional address: a slot index along the parent's surface.
+ *
+ * This is what replaced a square anchor grid over the planet's disc. That grid put regions in the middle of a
+ * planet, which is mantle, and it only worked at all because the terrain was a map projection -- flat art of a
+ * round world rather than a genuinely flat one.
+ */
+
+/**
+ * How many slots a rim level divides its surface into. Always a power of two.
+ *
+ * A power of two keeps the slot boundaries exact in float64 and makes "which slot is under the camera" the same
+ * floor division the cell grid uses, so rim placement inherits the O(1) spatial query rather than needing its
+ * own. The target width is a fixed multiple of the child's own radius, which is what `spacing` means everywhere.
+ */
+export function rimCells(node: Node): number {
+  const level = LEVELS[node.kind];
+  const kind = level.child;
+  if (!kind || level.placement !== 'rim') return 0;
+  const rel = 2 ** (LEVELS[kind].logSpan - node.logSpan);
+  // A planet's surface is a whole turn of angle; below it, a frame is two local units of ground line wide.
+  const surface = node.kind === 'planet' ? Math.PI * 2 : 2;
+  const want = surface / Math.max(1e-12, 2 * rel * level.spacing);
+  return 2 ** Math.max(1, Math.min(24, Math.round(Math.log2(want))));
+}
+
+/** Which rim slot a point in node units falls in. */
+export function rimCellAt(node: Node, nx: number, ny: number): number {
+  const count = rimCells(node);
+  if (count === 0) return 0;
+  // On the planet the surface coordinate IS the angle; below it, it is the local horizontal.
+  const u = node.kind === 'planet' ? Math.atan2(ny, nx) / Math.PI : nx;
+  return Math.max(0, Math.min(count - 1, Math.floor(((u + 1) / 2) * count)));
+}
+
+/**
+ * The child in a rim slot, or null if that slot is empty -- which includes every slot whose ground is under
+ * water. NOTHING IS BUILT IN THE SEA, and this is the one place that rule is enforced: placement asks the same
+ * field the surface is drawn from, at a fixed detail level, so the answer is a pure function of address.
+ */
+export function rimChild(node: Node, index: number): ChildRef | null {
+  const level = LEVELS[node.kind];
+  const kind = level.child;
+  if (!kind || level.placement !== 'rim') return null;
+  const g = node.ground;
+  if (!g) return null;
+  const count = rimCells(node);
+  if (!Number.isInteger(index) || index < 0 || index >= count) return null;
+
+  /**
+   * No density roll and no size jitter: rim slots TILE, so every one holds a child, each sits at its slot's centre,
+   * and each is exactly as wide as its slot. `density` describes how many are INHABITED -- see `isInhabited`.
+   *
+   * The size is DERIVED from the slot rather than taken from the level's nominal `logSpan`, and that is what makes
+   * the tiling exact. The nominal only decides how many slots there are, and the count is rounded to a power of
+   * two, so a child sized from the nominal comes out up to 40% narrower or wider than the slot it occupies --
+   * which left hairline gaps of bare parent between plates wherever it came out narrow. A level's logSpan was
+   * always a pacing knob rather than physics (see schema.ts), and here the pacing is what picks the slot count.
+   */
+  const id = hash3(node.id, 0x21b0, index);
+  const u = -1 + ((index + 0.5) * 2) / count;
+  const onPlanet = node.kind === 'planet';
+  const theta = onPlanet ? u * Math.PI : angleAtOffset(g, u);
+  const ground = groundAt(g.planetId, g.traits, theta, PLACEMENT_DETAIL);
+  // On the planet a slot is an ARC, so the child's radius is that arc's half-length at the ground it stands on.
+  const rel = onPlanet ? (Math.PI * ground) / count : 1 / count;
+  const logSpan = node.logSpan + Math.log2(rel);
+
+  /**
+   * Node space has y pointing DOWN, the way the screen does, so a child standing higher than its parent's
+   * origin sits at NEGATIVE oy. On the planet there is no flip to make: the child is simply at the point on the
+   * circle, and `theta` is measured in that same y-down space throughout.
+   */
+  const ox = onPlanet ? Math.cos(theta) * ground : u;
+  const oy = onPlanet ? Math.sin(theta) * ground : -(ground - g.baseRadius) / g.span;
+
+  /**
+   * The child's frame, turned so its own "up" is away from the planet's centre.
+   *
+   * On the planet that is a big rotation and different for every region -- a region a quarter of the way round
+   * is drawn on its side relative to the planet's own axes. Below the planet it is the small difference between
+   * two angles, which is what keeps a settlement's ground line continuous with its region's.
+   */
+  const spin = onPlanet ? theta + Math.PI / 2 : theta - g.theta;
+
+  /**
+   * A region STRADDLES its planet's rim -- half of it is sky -- so the containment test that keeps cell
+   * children inside their parent's disc is exactly wrong here and is not applied on the planet. Below the
+   * planet it still is: a slot whose ground has climbed clean out of the frame is a cliff face, and putting a
+   * town in one would leave it floating in a corner with nothing under it.
+   */
+  if (!onPlanet && Math.abs(oy) + rel > 1) return null;
+
+  return { cell: { cx: index, cy: 0 }, id, kind, logSpan, ox, oy, rel, spin };
+}
+
+/**
+ * Whether anything is BUILT on this stretch of ground.
+ *
+ * Two conditions, and they are the two halves of the promise the project is built on. Nothing stands in the sea,
+ * which is why this asks the same terrain field that drew the shore -- at a fixed detail level, so the answer is a
+ * pure function of address and a house near the waterline does not blink in and out as you approach it. And only
+ * `density` of the dry stretches are settled at all, because a world of continuous city is not a world.
+ */
+export function isInhabited(node: Node): boolean {
+  const g = node.ground;
+  if (!g || node.kind === 'planet') return false;
+  if (g.baseRadius <= seaRadiusOf(g.planetId, g.traits)) return false;
+  const parentKind = KIND_ORDER[Math.max(0, KIND_ORDER.indexOf(node.kind) - 1)]!;
+  return f01(hash2(node.id, 0x01)) < LEVELS[parentKind].density;
+}
+
+const rimCache = new Map<number, ChildRef[]>();
+
+/**
+ * Every child along a parent's surface, cached.
+ *
+ * Positions are time-independent, and each entry costs a terrain sample at placement detail, so a planet's
+ * thousand slots are worth computing once rather than once per frame.
+ */
+export function rimChildren(node: Node): ChildRef[] {
+  const hit = rimCache.get(node.id);
+  if (hit) return hit;
+  const out: ChildRef[] = [];
+  const count = rimCells(node);
+  for (let i = 0; i < count; i++) {
+    const ref = rimChild(node, i);
+    if (ref) out.push(ref);
+  }
+  if (rimCache.size > 64) rimCache.clear();
+  rimCache.set(node.id, out);
+  return out;
+}
+
+/** The rim child nearest a point in node units, searching outwards from the slot the point is in. */
+export function nearestRim(node: Node, nx: number, ny: number, searchSlots = 24): ChildRef | null {
+  const count = rimCells(node);
+  if (count === 0) return null;
+  const here = rimCellAt(node, nx, ny);
+  const wraps = node.kind === 'planet';
+  for (let d = 0; d <= searchSlots; d++) {
+    for (const i of d === 0 ? [here] : [here - d, here + d]) {
+      // The planet's surface closes on itself, so its slots wrap; a frame below it has two real ends.
+      const j = wraps ? ((i % count) + count) % count : i;
+      if (j < 0 || j >= count) continue;
+      const ref = rimChild(node, j);
+      if (ref) return ref;
+    }
+  }
+  return null;
 }
 
 /**
@@ -291,6 +485,7 @@ export function childNear(node: Node, nx: number, ny: number, searchRings = 6): 
     return best;
   }
   if (level.placement === 'scatter') return nearestScatter(node, nx, ny);
+  if (level.placement === 'rim') return nearestRim(node, nx, ny, searchRings * 4);
 
   const here = anchorCellAt(node, nx, ny);
   const direct = childAt(node, here);
@@ -316,6 +511,11 @@ export function childrenNear(node: Node, nx: number, ny: number, limit = 24): Ch
     // Nearest first, so Tab tours the stars around you rather than the galaxy's index order. Sorting a
     // COPY: the list itself is cached and shared with the renderer.
     const all = scatterChildren(node).slice();
+    all.sort((a, b) => (nx - a.ox) ** 2 + (ny - a.oy) ** 2 - ((nx - b.ox) ** 2 + (ny - b.oy) ** 2));
+    return all.slice(0, limit);
+  }
+  if (level.placement === 'rim') {
+    const all = rimChildren(node).slice();
     all.sort((a, b) => (nx - a.ox) ** 2 + (ny - a.oy) ** 2 - ((nx - b.ox) ** 2 + (ny - b.oy) ** 2));
     return all.slice(0, limit);
   }
@@ -392,6 +592,7 @@ export function scatterChild(node: Node, index: number): ChildRef | null {
     ox,
     oy,
     rel: 2 ** (logSpan - node.logSpan),
+    spin: 0,
   };
 }
 

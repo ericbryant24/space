@@ -28,7 +28,7 @@ export type Kind =
  * had no answer. A galaxy now carries a few thousand CATALOGUED systems: the stars you see are the
  * stars you can go to. The rest of its hundred billion remain unresolved glow, which is honest.
  */
-export type Placement = 'cells' | 'orbits' | 'scatter';
+export type Placement = 'cells' | 'orbits' | 'scatter' | 'rim';
 
 export interface Level {
   readonly kind: Kind;
@@ -51,9 +51,23 @@ export const LEVELS: Readonly<Record<Kind, Level>> = {
   cluster: { kind: 'cluster', placement: 'cells', logSpan: 75, child: 'galaxy', density: 0.55, spacing: 4, sizeJitter: 0.45, label: 'Cluster' },
   galaxy: { kind: 'galaxy', placement: 'scatter', logSpan: 69, child: 'system', density: 0.5, spacing: 4, sizeJitter: 0.35, label: 'Galaxy' },
   system: { kind: 'system', placement: 'orbits', logSpan: 40, child: 'planet', density: 0.5, spacing: 4, sizeJitter: 0.5, label: 'System' },
-  planet: { kind: 'planet', placement: 'cells', logSpan: 23, child: 'region', density: 0.7, spacing: 3, sizeJitter: 0.2, label: 'Planet' },
-  region: { kind: 'region', placement: 'cells', logSpan: 15, child: 'settlement', density: 0.45, spacing: 4, sizeJitter: 0.3, label: 'Region' },
-  settlement: { kind: 'settlement', placement: 'cells', logSpan: 10, child: 'building', density: 0.6, spacing: 3, sizeJitter: 0.35, label: 'Settlement' },
+  /**
+   * EVERY RIM LEVEL TILES: spacing 1, density 1. A stretch of ground is always a real place.
+   *
+   * Each plate paints the ground it covers, and a parent stops being drawn long before its children get small, so
+   * a level with gaps in it leaves bare sky between its children at exactly the zoom where it is the only thing
+   * drawing. Tiling is what makes the ground continuous at every depth of the descent.
+   *
+   * `density` therefore does not mean "how many places exist" down here -- it means how many of them are
+   * INHABITED, which is a fact about the place rather than about whether the place is there at all. Nothing is
+   * decorative: an empty stretch of coast is as real as a town, and you can zoom into it.
+   */
+  // `sizeJitter` is 0 on every rim level, and has to be: a plate is exactly as wide as the slot it tiles.
+  planet: { kind: 'planet', placement: 'rim', logSpan: 23, child: 'region', density: 1, spacing: 1, sizeJitter: 0, label: 'Planet' },
+  region: { kind: 'region', placement: 'rim', logSpan: 15, child: 'settlement', density: 0.5, spacing: 1, sizeJitter: 0, label: 'Region' },
+  // A third of the slots, not two thirds. At 0.62 a settlement's forty buildings met edge to edge and read as a
+  // dotted texture along the ground rather than as houses; the gaps are what make them separate things.
+  settlement: { kind: 'settlement', placement: 'rim', logSpan: 10, child: 'building', density: 0.34, spacing: 1, sizeJitter: 0, label: 'Settlement' },
   building: { kind: 'building', placement: 'cells', logSpan: 4, child: null, density: 0, spacing: 1, sizeJitter: 0, label: 'Building' },
 };
 

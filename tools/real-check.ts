@@ -83,14 +83,20 @@ const probe = (page: Page, edgeFraction: number) =>
     const w = window as unknown as {
       __hits(): { path: string; kind: string; x: number; y: number; r: number }[];
       __pick(x: number, y: number): { kind: string; path: string; x: number; y: number } | null;
-      __cam: { node: { path: unknown[] } };
+      __cam: { node: { path: { cx: number; cy: number }[] } };
     };
     const depthOf = (p: string) => p.split('/').filter(Boolean).length;
     const here = w.__cam.node.path.length;
-    // Marks for the focus node and its ancestors are excluded: those are the place you are standing in, and
-    // "travel to where you already are" is correctly not offered.
+    const focus = w.__cam.node.path.map((c) => `${c.cx}.${c.cy}`).join('/');
+    /**
+     * The focus node and its ancestors are excluded -- those are the place you are standing in, and "travel to
+     * where you already are" is correctly not offered. SIBLINGS are not: they are at the same depth as the focus
+     * and they are most of what is on screen below a planet, because a rim parent hands the painting over to its
+     * children rather than drawing both. Filtering on depth alone reported zero marks at every surface level,
+     * which made the check silently vacuous exactly where the newest art is.
+     */
     const all = w.__hits();
-    const marks = all.filter((m) => depthOf(m.path) > here);
+    const marks = all.filter((m) => depthOf(m.path) >= here && m.path !== focus);
 
     const centreMisses: Report['centreMisses'] = [];
     const edgeMisses: Report['edgeMisses'] = [];

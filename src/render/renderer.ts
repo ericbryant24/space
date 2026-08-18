@@ -1,4 +1,5 @@
 import { frameToNode, nodeToFrame, pxPerUnit, type Camera, type View } from '../camera/camera.ts';
+import { childToParent } from '../camera/rebase.ts';
 import { catalogName } from '../cosmic/catalog.ts';
 import {
   childAt,
@@ -7,8 +8,10 @@ import {
   orbitCount,
   orbitRadius,
   orbitalChildren,
+  rimChildren,
   scatterChildren,
   type Cell,
+  type ChildRef,
   type Node,
 } from '../universe/node.ts';
 import { galaxyTraits, type GalaxyTraits } from '../universe/gen/galaxy.ts';
@@ -28,7 +31,8 @@ import {
   systemStarRadius,
 } from './draw/containers.ts';
 import { PLANET_ICON_MIN_PX, drawOrbitRing, drawPlanetIcon, skyTone } from './draw/planet.ts';
-import { drawRegion } from './draw/ground.ts';
+import { PLATE_RIND, drawSurfacePlate } from './draw/ground.ts';
+import { beginStructureFrame } from './draw/houses.ts';
 import type { PlanetTraits } from '../universe/gen/planet.ts';
 import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
 
@@ -45,21 +49,23 @@ const ANCESTOR_LIMIT_DIAGONALS = 64;
 /** Past this the node's own silhouette is off-screen anyway; iterate its children but skip its disc. */
 const MAX_SELF_DRAW_DIAGONALS = 2.5;
 /**
- * A planet keeps drawing its own surface long past the general limit, because its regions do not become
- * areas until it is several screens across, and dropping the disc at 2.5 diagonals left a stretch of
- * bare sky in between.
+ * A planet keeps drawing its own body long past the general limit, because that is what paints the ground until its
+ * regions take over -- and the two have to meet exactly.
  *
- * But not without limit. The illustration is built from shapes measured in planet radii -- a terminator
- * rect at 1.2r, ring ellipses out to 1.9r, a rim-light arc stroked at 0.045r -- and at forty thousand
- * pixels of radius those cost enough to take the tab down with them; zooming into certain planets
- * crashed the renderer outright. Past this limit the disc is one flat colour over the whole viewport
- * anyway, which is exactly what `drawGround` paints instead.
+ * The reciprocal of PLATE_RIND, and not a free number. A plate paints one screen diagonal of rock below its ground
+ * line, so at the handover the disc must be `1 / PLATE_RIND` diagonals across for the rind it paints to be the same
+ * depth as the rock the plates paint. Any other value shows a dark band of planet interior appearing or vanishing at
+ * the moment the switch happens.
+ *
+ * There is a cost ceiling behind this too: the illustration used to be built from shapes measured in planet radii --
+ * a terminator rect at 1.2r, ring ellipses out to 1.9r, a rim-light arc stroked at 0.045r -- and at forty thousand
+ * pixels of radius those took the tab down with them. What is left is one closed curve and a few concentric arcs,
+ * most of them off screen, which is affordable at any size.
  */
-const PLANET_MAX_DIAGONALS = 6;
+const PLANET_MAX_DIAGONALS = 1 / PLATE_RIND;
 const MAX_DEPTH = 5;
 const DRAW_BUDGET = 12000;
 const CELL_BUDGET = 24000;
-const LABEL_BUDGET = 90;
 /**
  * Records scattered stars in the hit list, which normal frames deliberately do not do -- there can be a
  * couple of thousand on screen, and `scatterHitAt` finds them analytically instead.
@@ -72,7 +78,6 @@ let recordAllHits = false;
 export function setRecordAllHits(on: boolean): void {
   recordAllHits = on;
 }
-const LABEL_MIN_PX = 26;
 /** Anything at least this big on screen becomes a click target. */
 const HIT_MIN_PX = 2.5;
 /**
@@ -95,7 +100,6 @@ const SCATTER_FULL_PARENT_PX = 320;
  * star. A planet is only meaningful once its system is a frame you are looking into.
  */
 const ORBIT_MIN_PARENT_PX = 70;
-
 /**
  * Minimum on-screen size for a child of a given kind to be worth drawing at all.
  *
@@ -104,8 +108,16 @@ const ORBIT_MIN_PARENT_PX = 70;
  * not as geography. A region only means anything once it is an area.
  */
 const MIN_CHILD_PX_BY_KIND: Partial<Record<Kind, number>> = {
-  region: 20,
-  settlement: 6,
+  /**
+   * The rim floors have a hard constraint on them, not a taste: a parent stops drawing its own body at
+   * PLANET_MAX_DIAGONALS / MAX_SELF_DRAW_DIAGONALS, so its children must already be above their floor by then or
+   * there is a stretch of the descent with nothing painting the ground at all. A planet tiles its rim with about a
+   * thousand regions and stops drawing itself at six diagonals, which puts the region floor at eight pixels.
+   */
+  region: 8,
+  settlement: 8,
+  // A building is a front elevation. Below a few pixels there is no elevation to read, only a tick mark.
+  building: 5,
 };
 
 export interface HitEntry {
@@ -179,6 +191,7 @@ export function render(
     hits: [],
   };
   beginSpriteFrame();
+  beginStructureFrame();
   const diagonal = Math.hypot(view.w, view.h);
   const frame: Frame = { ctx, cam, tree, view, r, diagonal, detailBias, lastDrawnRadius: 0, childAlpha: 1, scatterParentPx: 0, stats };
 
@@ -191,7 +204,16 @@ export function render(
   let node: Node = cam.node;
   let centreX = cxF;
   let centreY = cyF;
-  let scale = 2 ** cam.k;
+  /**
+   * The map from a node's own units into camera-frame units, as ONE COMPLEX NUMBER.
+   *
+   * `(ax, ay)` is a scale of `hypot(ax, ay)` combined with a rotation of `atan2(ay, ax)`. It was a bare scalar
+   * until frames below a planet started carrying a rotation, and a complex number is the whole of the change:
+   * composing a child is one complex multiply, and climbing to a parent is one complex divide. No matrices, and
+   * the rotation-free path -- everything above a planet, where ay is exactly 0 -- costs the same as it did.
+   */
+  let ax = 2 ** cam.k;
+  let ay = 0;
 
   // Climb towards the root so that siblings of the focus node are on screen too, stopping before an
   // ancestor grows so large that drawing it is pointless.
@@ -200,11 +222,16 @@ export function render(
     const ref = tree.refOf(node);
     const parent = tree.parentOf(node);
     if (!ref || !parent) break;
-    const parentScale = scale / ref.rel;
-    if (parentScale * r > limit) break;
-    centreX -= ref.ox * parentScale;
-    centreY -= ref.oy * parentScale;
-    scale = parentScale;
+    // Divide by rel * e^(i*spin): the inverse of what descending into this child does.
+    const c = ref.spin === 0 ? 1 : Math.cos(ref.spin);
+    const sn = ref.spin === 0 ? 0 : Math.sin(ref.spin);
+    const px = (ax * c + ay * sn) / ref.rel;
+    const py = (ay * c - ax * sn) / ref.rel;
+    if (Math.hypot(px, py) * r > limit) break;
+    centreX -= px * ref.ox - py * ref.oy;
+    centreY -= py * ref.ox + px * ref.oy;
+    ax = px;
+    ay = py;
     node = parent;
   }
   stats.topKind = node.kind;
@@ -222,9 +249,30 @@ export function render(
   // instead of it, so the handover is a crossfade rather than a switch.
   if (drawGround(frame)) stats.draws++;
 
-  paint(frame, node, centreX, centreY, scale, 0);
+  paint(frame, node, centreX, centreY, ax, ay, 0);
   stats.spritesPending = spritesPending();
   return stats;
+}
+
+/**
+ * A child's frame: where its origin sits in camera-frame units, and its own scale-and-rotation.
+ *
+ * One complex multiply. `origin' = origin + a * (ox, oy)` and `a' = a * rel * e^(i * spin)` -- exactly the
+ * composition `enterChild` inverts, which is what keeps the picture and the camera in agreement.
+ */
+function childFrame(
+  cxF: number,
+  cyF: number,
+  ax: number,
+  ay: number,
+  ref: ChildRef,
+): [number, number, number, number] {
+  const x = cxF + ax * ref.ox - ay * ref.oy;
+  const y = cyF + ay * ref.ox + ax * ref.oy;
+  if (ref.spin === 0) return [x, y, ax * ref.rel, ay * ref.rel];
+  const c = Math.cos(ref.spin);
+  const sn = Math.sin(ref.spin);
+  return [x, y, (ax * c - ay * sn) * ref.rel, (ay * c + ax * sn) * ref.rel];
 }
 
 /**
@@ -237,11 +285,16 @@ function paint(
   node: Node,
   cxF: number,
   cyF: number,
-  scale: number,
+  ax: number,
+  ay: number,
   depth: number,
   schematic = false,
 ): void {
   const { ctx, cam, view, r, stats } = frame;
+  const scale = ay === 0 ? Math.abs(ax) : Math.hypot(ax, ay);
+  // How far this node's frame is turned from the screen's. Non-zero only below a planet, where a node's own "up"
+  // is the direction away from the planet's centre -- see ChildRef.spin.
+  const spin = ay === 0 ? 0 : Math.atan2(ay, ax);
   const trueRPx = scale * r;
   const rPx = schematic ? Math.max(trueRPx, PLANET_ICON_MIN_PX) : trueRPx;
   if (rPx < MIN_DRAW_PX) return;
@@ -260,7 +313,15 @@ function paint(
   const selfVisible = rPx <= selfLimit * frame.diagonal;
   if (selfVisible) {
     frame.lastDrawnRadius = rPx;
-    drawDisc(frame, node, sx, sy, rPx, trueRPx, schematic);
+    /**
+     * The rotation is applied to the CANVAS, not to the coordinates.
+     *
+     * `sx`/`sy` already have the rotation baked into them through `ax`/`ay`, so the hit list and every screen
+     * measurement stay in plain unrotated screen space and nothing downstream has to know. What is left is the
+     * orientation of the shape drawn at that point, which is the canvas's job -- and a pure rotation is the one
+     * transform that leaves `lineWidth` in screen pixels, so the thick cartoon outlines survive it untouched.
+     */
+    drawDisc(frame, node, sx, sy, rPx, trueRPx, schematic, spin);
     stats.draws++;
 
     // Use the radius actually drawn, so a schematic planet is as clickable as it looks.
@@ -274,17 +335,14 @@ function paint(
       stats.hits.push({ path: node.path, kind: node.kind, xPx: sx, yPx: sy, rPx: hitR, trueRPx });
     }
     /**
-     * Orbital bodies are named at ANY size. A system holds under ten planets drawn as four-pixel dots on a
-     * chart, and an unlabelled dot is the one thing on screen you cannot tell anything about -- naming them
-     * is the whole difference between an orbital diagram and a scatter of pixels. Scattered stars are
-     * excluded by the same test: there are a couple of thousand of those, and a couple of thousand names is
-     * not a chart.
+     * NO NAMES ON THE CANVAS.
+     *
+     * Every object used to carry its name here, and orbital bodies carried theirs at any size at all, on the
+     * argument that an unlabelled four-pixel dot is the one thing on screen you can learn nothing from. The
+     * argument was right and the conclusion was wrong: the answer is to draw the dot so it tells you something,
+     * not to write a caption on it. What replaces the names is bookmarking -- a place you care about is a place
+     * you keep, and a thumbnail of it says which place it is without a word. See src/ui/bookmarks.ts.
      */
-    const orbital = schematic && frame.scatterParentPx === 0;
-    if ((orbital || hitR >= LABEL_MIN_PX) && stats.labels < LABEL_BUDGET) {
-      drawLabel(frame, node, sx, sy, hitR);
-      stats.labels++;
-    }
   }
 
   const level = LEVELS[node.kind];
@@ -306,7 +364,46 @@ function paint(
   if (level.placement === 'orbits') {
     if (rPx < ORBIT_MIN_PARENT_PX) return;
     for (const ref of orbitalChildren(node)) {
-      paint(frame, makeChild(node, ref), cxF + ref.ox * scale, cyF + ref.oy * scale, ref.rel * scale, depth + 1, true);
+      const [kx, ky, kax, kay] = childFrame(cxF, cyF, ax, ay, ref);
+      paint(frame, makeChild(node, ref), kx, ky, kax, kay, depth + 1, true);
+    }
+    return;
+  }
+
+  if (level.placement === 'rim') {
+    /**
+     * THE HANDOVER: a rim parent paints its own body, or its children's plates, and never both.
+     *
+     * `selfVisible` is exactly the right switch, and using it removes a whole class of tuning. A plate paints a full
+     * screen diagonal of rock below its ground line, so plates drawn while their parent is also drawn would bury
+     * the parent's interior under a ring of soil -- and gating on a pixel floor instead left a stretch of the
+     * descent where the parent had stopped drawing and the children had not started, which showed as a screen of
+     * bare sky. Complementary conditions cannot leave a gap or an overlap. It is also why PLANET_MAX_DIAGONALS is
+     * the reciprocal of PLATE_RIND: at the moment of the switch, the rind the disc paints and the rock a plate
+     * paints have to be the same depth.
+     */
+    if (selfVisible) return;
+    const floor = MIN_CHILD_PX_BY_KIND[level.child] ?? MIN_CHILD_PX;
+    /**
+     * Culled here, before `makeChild`, and not left to `paint`'s own bounds test.
+     *
+     * A planet tiles its rim with about a thousand regions and only a handful are ever on screen, but building
+     * each one costs a terrain sample at placement detail -- sixteen octaves -- so handing all thousand to
+     * `paint` and letting it reject them was the whole frame. The test below is the same one `paint` applies,
+     * done on the ref instead of the node, which is arithmetic only.
+     */
+    for (const ref of rimChildren(node)) {
+      const childR = ref.rel * scale * r;
+      if (childR < floor) continue;
+      const [kx, ky, kax, kay] = childFrame(cxF, cyF, ax, ay, ref);
+      const sx = view.w / 2 + (kx - cam.fx) * r;
+      const sy = view.h / 2 + (ky - cam.fy) * r;
+      if (sx + childR < 0 || sy + childR < 0 || sx - childR > view.w || sy - childR > view.h) continue;
+      paint(frame, makeChild(node, ref), kx, ky, kax, kay, depth + 1);
+      if (stats.draws >= DRAW_BUDGET) {
+        stats.budgetHit = true;
+        break;
+      }
     }
     return;
   }
@@ -325,7 +422,8 @@ function paint(
     // once the loop finishes. Labels and hit records still happen per star inside `paint`.
     beginStarBatch();
     for (const ref of scatterChildren(node)) {
-      paint(frame, makeChild(node, ref), cxF + ref.ox * scale, cyF + ref.oy * scale, ref.rel * scale, depth + 1, true);
+      const [kx, ky, kax, kay] = childFrame(cxF, cyF, ax, ay, ref);
+      paint(frame, makeChild(node, ref), kx, ky, kax, kay, depth + 1, true);
       if (stats.draws >= DRAW_BUDGET) {
         stats.budgetHit = true;
         break;
@@ -368,14 +466,8 @@ function paint(
       cell.cy = cy;
       const ref = childAt(node, cell);
       if (!ref) continue;
-      paint(
-        frame,
-        makeChild(node, ref),
-        cxF + ref.ox * scale,
-        cyF + ref.oy * scale,
-        ref.rel * scale,
-        depth + 1,
-      );
+      const [kx, ky, kax, kay] = childFrame(cxF, cyF, ax, ay, ref);
+      paint(frame, makeChild(node, ref), kx, ky, kax, kay, depth + 1);
       if (stats.draws >= DRAW_BUDGET) {
         stats.budgetHit = true;
         return;
@@ -394,10 +486,34 @@ const CONTAINER: Partial<Record<Kind, number>> = {
   // Interplanetary space is empty and dark. A strong wash here turned every system into a warm haze and
   // hid the galaxy behind it, so a system gets little more than its boundary and its orbits.
   system: 0.14,
-  settlement: 1,
 };
 
 function drawDisc(
+  frame: Frame,
+  node: Node,
+  sx: number,
+  sy: number,
+  rPx: number,
+  trueRPx: number,
+  schematic: boolean,
+  spin: number,
+): void {
+  const { ctx } = frame;
+
+  if (spin !== 0) {
+    ctx.save();
+    ctx.translate(sx, sy);
+    ctx.rotate(spin);
+    ctx.translate(-sx, -sy);
+    drawDiscUpright(frame, node, sx, sy, rPx, trueRPx, schematic);
+    ctx.restore();
+    return;
+  }
+  drawDiscUpright(frame, node, sx, sy, rPx, trueRPx, schematic);
+}
+
+/** The body of `drawDisc`, with the canvas already turned to this node's own frame. */
+function drawDiscUpright(
   frame: Frame,
   node: Node,
   sx: number,
@@ -413,6 +529,17 @@ function drawDisc(
     return;
   }
 
+  /**
+   * Everything below a planet is the surface seen edge on: rock below, sky above, the ground line running across.
+   * A region, a settlement and a building differ in how much of the same ground they show, not in what kind of
+   * picture they are, so they share one painter. It reaches a full screen diagonal above and below the ground,
+   * which is what lets a single plate carry the whole view when it is the only thing drawing.
+   */
+  if (node.kind === 'region' || node.kind === 'settlement' || node.kind === 'building') {
+    drawSurfacePlate(ctx, sx, sy, rPx, node, frame.diagonal);
+    return;
+  }
+
   if (node.kind === 'planet') {
     const traits = node.ground?.traits;
     if (!traits) return;
@@ -421,10 +548,6 @@ function drawDisc(
     return;
   }
 
-  if (node.kind === 'region') {
-    drawRegion(ctx, sx, sy, rPx, node);
-    return;
-  }
 
   if (node.kind === 'system' && schematic && frame.scatterParentPx > 0) {
     // The batch is flushed by the caller. The star still counts against the frame's draw budget, which
@@ -549,8 +672,7 @@ function galaxyViewport(
     const ref = tree.refOf(node);
     const parent: Node | null = tree.parentOf(node);
     if (!ref || !parent) return null;
-    nx = ref.ox + nx * ref.rel;
-    ny = ref.oy + ny * ref.rel;
+    [nx, ny] = childToParent(ref, nx, ny);
     unitScale *= ref.rel;
     node = parent;
   }
@@ -638,37 +760,6 @@ export function displayName(node: Node, tree: Tree): string {
   }
 }
 
-/**
- * Richer label for the hover reticle. `displayName` alone gives an uninhabited planet its catalogue
- * ordinal -- a bare "I" -- which tells the reader nothing about what they are pointing at.
- */
-export function hoverLabel(node: Node, tree: Tree): string {
-  const name = displayName(node, tree);
-  if (node.kind === 'planet') {
-    const found = planetCultureFor(node, tree);
-    if (found && !found.culture.inhabited) return `${name} · ${found.traits.label}`;
-    if (found) return `${name} · ${found.traits.label}`;
-  }
-  if (node.kind === 'field' || node.kind === 'cluster' || node.kind === 'galaxy' || node.kind === 'system') {
-    return name;
-  }
-  return `${name} · ${LEVELS[node.kind].label.toLowerCase()}`;
-}
-
-function drawLabel(frame: Frame, node: Node, sx: number, sy: number, rPx: number): void {
-  const { ctx } = frame;
-  const text = displayName(node, frame.tree);
-  ctx.font = '600 12px ui-sans-serif, system-ui, sans-serif';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  const y = sy + Math.min(rPx + 14, 40);
-  ctx.lineWidth = 3;
-  ctx.strokeStyle = 'rgba(8,10,18,0.85)';
-  ctx.strokeText(text, sx, y);
-  ctx.fillStyle = 'rgba(240,244,255,0.92)';
-  ctx.fillText(text, sx, y);
-}
-
 /** Topmost object under a screen point, from the list the renderer just built. */
 /**
  * What is under a screen point: the DEEPEST thing whose grab radius contains it, and among equals the
@@ -717,7 +808,7 @@ export { frameToNode };
  * on to this". Nothing says so in words, because the behaviour says it: the marker sits still while the
  * rest of the sky slides past it.
  */
-export function drawLock(ctx: CanvasRenderingContext2D, hit: HitEntry, name: string): void {
+export function drawLock(ctx: CanvasRenderingContext2D, hit: HitEntry): void {
   const r = Math.max(hit.rPx, 13) + 8;
   ctx.save();
   ctx.strokeStyle = 'rgba(255, 209, 102, 0.85)';
@@ -731,17 +822,10 @@ export function drawLock(ctx: CanvasRenderingContext2D, hit: HitEntry, name: str
     ctx.lineTo(hit.xPx + cos * r, hit.yPx + sin * r);
     ctx.stroke();
   }
-  // Clear of the top arm, which reaches to r + 13.
-  drawNameTag(ctx, name, hit.xPx, hit.yPx - r - 37, 1);
   ctx.restore();
 }
 
-export function drawHover(
-  ctx: CanvasRenderingContext2D,
-  hit: HitEntry,
-  name: string,
-  pulse: number,
-): void {
+export function drawHover(ctx: CanvasRenderingContext2D, hit: HitEntry, pulse: number): void {
   const r = Math.max(hit.rPx, 11) + 4 + Math.sin(pulse * 3.2) * 1.4;
   ctx.save();
   ctx.lineWidth = 1.6;
@@ -760,47 +844,9 @@ export function drawHover(
     ctx.stroke();
   }
 
-  drawNameTag(ctx, name, hit.xPx, hit.yPx - r - 26, 0.35);
   ctx.restore();
 }
 
-/** A name on a rounded plate. The one piece of text the pointer is allowed to put on the canvas. */
-function drawNameTag(
-  ctx: CanvasRenderingContext2D,
-  label: string,
-  cx: number,
-  top: number,
-  edge: number,
-): void {
-  ctx.font = '700 12.5px Nunito, ui-sans-serif, system-ui, sans-serif';
-  const w = ctx.measureText(label).width;
-  ctx.fillStyle = 'rgba(10, 13, 24, 0.82)';
-  roundRect(ctx, cx - w / 2 - 7, top, w + 14, 20, 10);
-  ctx.fill();
-  ctx.strokeStyle = `rgba(255, 209, 102, ${edge})`;
-  ctx.lineWidth = 1;
-  roundRect(ctx, cx - w / 2 - 7, top, w + 14, 20, 10);
-  ctx.stroke();
-  ctx.fillStyle = '#ffd166';
-  ctx.textAlign = 'center';
-  ctx.textBaseline = 'middle';
-  ctx.fillText(label, cx, top + 10.5);
-}
-
-function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number): void {
-  const rr = Math.min(r, w / 2, h / 2);
-  ctx.beginPath();
-  ctx.moveTo(x + rr, y);
-  ctx.lineTo(x + w - rr, y);
-  ctx.quadraticCurveTo(x + w, y, x + w, y + rr);
-  ctx.lineTo(x + w, y + h - rr);
-  ctx.quadraticCurveTo(x + w, y + h, x + w - rr, y + h);
-  ctx.lineTo(x + rr, y + h);
-  ctx.quadraticCurveTo(x, y + h, x, y + h - rr);
-  ctx.lineTo(x, y + rr);
-  ctx.quadraticCurveTo(x, y, x + rr, y);
-  ctx.closePath();
-}
 
 /**
  * The scattered star under a screen point, found analytically rather than from the frame's hit list.

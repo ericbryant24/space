@@ -113,18 +113,24 @@ const main = async () => {
   console.log(`hashnav   kind=${flown.kind} path=${flown.path || 'root'}`);
   if (flown.path !== '') fail(`hash navigation landed at "${flown.path}", expected the root`);
 
-  // Go back to somewhere deep so the breadcrumb has rungs to click.
+  // Go back to somewhere deep so the rung ladder has rungs to click.
   await page.goto(BASE + link, { waitUntil: 'commit' });
   await rest(page);
 
-  // 4. Breadcrumb click flies to an ancestor.
-  const crumbs = await page.locator('.trail .crumb').count();
-  if (crumbs < 3) fail(`expected a breadcrumb trail, found ${crumbs} crumbs`);
-  await page.locator('.trail .crumb').nth(1).click();
+  /**
+   * 4. A rung of the ladder flies out to that ancestor.
+   *
+   * This used to be a breadcrumb trail of level names. The names are gone -- see src/ui/hud.ts -- and eight pips
+   * do the same job wordlessly, so what is checked is the behaviour rather than the labels: click the second rung,
+   * end up one level down from the root.
+   */
+  const rungs = await page.locator('.rungs .pip').count();
+  if (rungs !== 8) fail(`expected eight rungs of the ladder, found ${rungs}`);
+  await page.locator('.rungs .pip').nth(1).click();
   await rest(page);
   const risen = await state(page);
-  console.log(`crumb     kind=${risen.kind} path=${risen.path}`);
-  if (risen.path.split('/').filter(Boolean).length !== 1) fail(`breadcrumb landed at depth ${risen.path}`);
+  console.log(`rung      kind=${risen.kind} path=${risen.path}`);
+  if (risen.path.split('/').filter(Boolean).length !== 1) fail(`a rung landed at depth ${risen.path}`);
 
   // 5. Back must retrace to where we were.
   await page.goBack();

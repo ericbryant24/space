@@ -1,8 +1,8 @@
 import { simTime } from '../../core/clock.ts';
-import { coastlineOf } from '../../culture/terrain.ts';
 import { f01, hash2, hash3 } from '../../core/rng.ts';
 import { isGiant, type PlanetClass, type PlanetTraits } from '../../universe/gen/planet.ts';
 import { outlineWidth } from '../bands.ts';
+import { drawPlanetBody } from './ground.ts';
 import { atLuminance, css, hueDelta, luminanceOf, shade, solveL, type Hsl } from '../color.ts';
 
 /**
@@ -65,100 +65,6 @@ export function surfaceColours(t: PlanetTraits): Surface {
   };
 }
 
-/**
- * A wobbly closed blob: a circle with its radius perturbed at a dozen control points and closed with a
- * Catmull-Rom pass. Not noise -- the low control count is what makes it read as drawn by hand.
- */
-function blobPath(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  radius: number,
-  seed: number,
-  points = 11,
-  wobble = 0.24,
-): void {
-  const pts: [number, number][] = [];
-  for (let i = 0; i < points; i++) {
-    const a = (i / points) * Math.PI * 2;
-    const r = radius * (1 - wobble / 2 + f01(hash2(seed, i)) * wobble);
-    pts.push([cx + Math.cos(a) * r, cy + Math.sin(a) * r]);
-  }
-  ctx.beginPath();
-  for (let i = 0; i < pts.length; i++) {
-    const p0 = pts[(i - 1 + pts.length) % pts.length]!;
-    const p1 = pts[i]!;
-    const p2 = pts[(i + 1) % pts.length]!;
-    const p3 = pts[(i + 2) % pts.length]!;
-    if (i === 0) ctx.moveTo(p1[0], p1[1]);
-    // Catmull-Rom expressed as a cubic Bezier.
-    ctx.bezierCurveTo(
-      p1[0] + (p2[0] - p0[0]) / 6,
-      p1[1] + (p2[1] - p0[1]) / 6,
-      p2[0] - (p3[0] - p1[0]) / 6,
-      p2[1] - (p3[1] - p1[1]) / 6,
-      p2[0],
-      p2[1],
-    );
-  }
-  ctx.closePath();
-}
-
-/**
- * Continents, traced from the planet's own terrain field.
- *
- * Not blobs. Six wobbly blob paths were what this used to draw, and they existed nowhere except inside this
- * function -- so nothing below the planet could agree with them, and the coastline you saw from orbit was
- * not the coastline you would land on. The outline here is the zero crossing of `elevationAt`, the same
- * function a region samples over its own patch, so agreement is not maintained, it is structural.
- *
- * Islands, bays and inland seas come free: they are simply what the field does, rather than shapes anyone
- * had to decide to draw.
- */
-function paintContinents(
-  ctx: CanvasRenderingContext2D,
-  cx: number,
-  cy: number,
-  r: number,
-  t: PlanetTraits,
-  id: number,
-  s: Surface,
-): void {
-  const coast = coastlineOf(id, t);
-  // No rings at all means no land: the trace is windowed so that outside every ring is water, so a world with
-  // nothing above sea level has nothing to draw and the disc's own sea colour is the whole picture.
-  if (coast.rings.length === 0) return;
-
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-
-  ctx.beginPath();
-  for (const ring of coast.rings) {
-    for (let i = 0; i < ring.length; i += 2) {
-      const px = cx + ring[i]! * r;
-      const py = cy + ring[i + 1]! * r;
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.closePath();
-  }
-  // Even-odd, so a ring inside a ring is a lake without anyone having to get the winding order right.
-  ctx.fillStyle = css(s.land);
-  ctx.fill('evenodd');
-
-  // A coastline in ink, not black: the outline is what makes flat fills read as drawn rather than as an
-  // untextured render.
-  const w = outlineWidth(r, 2);
-  if (w > 0) {
-    ctx.lineWidth = w;
-    ctx.strokeStyle = css(s.coast, 0.85);
-    ctx.stroke();
-  }
-  ctx.restore();
-}
-
 function paintBands(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, id: number, s: Surface): void {
   const count = 5 + Math.floor(f01(hash2(id, 0x41)) * 5);
   ctx.save();
@@ -200,64 +106,33 @@ function paintBands(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: nu
 }
 
 /**
- * Ice, as a flat cap across the top and the bottom of the disc.
+ * Cloud, as arcs of weather standing off the rim.
  *
- * Poles are at the top and bottom of a face-on disc, which is the one piece of sphere geometry that
- * survives into a flat drawing without implying depth: a lens-shaped band across each end, clipped, with
- * a wobbly inner boundary so it reads as ice rather than as a crop.
- */
-function paintCaps(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, id: number, s: Surface): void {
-  if (t.snowIndex <= 0.02) return;
-  // How far down from each pole the ice reaches, as a fraction of the radius.
-  const reach = Math.min(0.92, 0.14 + 0.72 * t.snowIndex);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.fillStyle = css(s.ice, 0.95);
-  for (const sign of [-1, 1]) {
-    // A blob wider than the disc, centred beyond the pole, so what lands inside the clip is a cap with a
-    // wobbly edge and a clean straight rim.
-    blobPath(ctx, cx, cy + sign * r * (2 - reach), r * 1.55, hash3(id, 0x51, sign), 13, 0.1);
-    ctx.fill();
-    const w = outlineWidth(r * 0.85, 1.6);
-    if (w > 0) {
-      ctx.lineWidth = w;
-      ctx.strokeStyle = css(s.coast, 0.5);
-      ctx.stroke();
-    }
-  }
-  ctx.restore();
-}
-
-/**
- * Cloud, drifting.
- *
- * The drift is a slow back-and-forth rather than a wrap all the way round, because a cloud sliding off one
- * limb and reappearing at the other is a rotation cue, and this planet does not turn. It is still the
- * single cheapest thing on screen that makes a world feel alive.
+ * Ellipses laid across the disc were the last of the map-projection art in this file: on a two-dimensional
+ * world there is no face to have weather over, so a cloud is a stretch of sky above a stretch of ground. Each
+ * one is a thick arc between the surface and the top of the atmosphere, drifting slowly around the world --
+ * and drifting all the way round is correct here, because a 2D planet's sky is a closed loop.
  */
 function paintClouds(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, id: number, s: Surface): void {
   if (t.cloudCover <= 0.04) return;
-  const count = 3 + Math.floor(t.cloudCover * 7);
-  ctx.save();
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.clip();
-  ctx.fillStyle = css(s.cloud, 0.4 + t.cloudCover * 0.28);
+  const count = 3 + Math.floor(t.cloudCover * 9);
+  const reach = AIR_REACH * Math.min(1, t.atmDensity);
+  if (reach * r < 2) return;
+  ctx.strokeStyle = css(s.cloud, 0.34 + t.cloudCover * 0.34);
   for (let i = 0; i < count; i++) {
-    // Spread across the disc rather than stacked: two wide ellipses at the same height read as one painted
-    // stripe, which is the last thing a sky should look like.
-    const lat = ((i + 0.5) / count) * 1.6 - 0.8 + (f01(hash3(id, 0x61, i)) - 0.5) * 0.18;
-    const period = 90 + f01(hash3(id, 0x62, i)) * 140;
-    const x = Math.sin((simTime() / period) * Math.PI * 2 + f01(hash3(id, 0x63, i)) * Math.PI * 2) * 0.42;
-    const w = r * (0.16 + f01(hash3(id, 0x64, i)) * 0.26);
-    const h = r * (0.04 + f01(hash3(id, 0x65, i)) * 0.05);
+    // Height in the air, thickness, angular length and drift rate all per cloud, so no two read as the same
+    // stamp repeated. Kept inside the air band, because a cloud above the atmosphere is not a cloud.
+    const lift = 1 + reach * (0.12 + 0.6 * f01(hash3(id, 0x61, i)));
+    const thick = r * reach * (0.1 + f01(hash3(id, 0x62, i)) * 0.24);
+    if (thick < 0.4) continue;
+    const arc = 0.04 + f01(hash3(id, 0x63, i)) * 0.4;
+    const period = (300 + f01(hash3(id, 0x64, i)) * 600) * (f01(hash3(id, 0x65, i)) < 0.5 ? -1 : 1);
+    const a0 = f01(hash3(id, 0x66, i)) * Math.PI * 2 + (simTime() / period) * Math.PI * 2;
+    ctx.lineWidth = thick;
     ctx.beginPath();
-    ctx.ellipse(cx + x * r, cy + lat * r, w, h, 0, 0, Math.PI * 2);
-    ctx.fill();
+    ctx.arc(cx, cy, r * lift, a0, a0 + arc);
+    ctx.stroke();
   }
-  ctx.restore();
 }
 
 export function drawPlanet(
@@ -269,19 +144,36 @@ export function drawPlanet(
   t: PlanetTraits,
 ): void {
   const s = surfaceColours(t);
-  const light = t.starLight;
 
-  // Disc.
-  ctx.fillStyle = css(s.sea);
-  ctx.beginPath();
-  ctx.arc(cx, cy, r, 0, Math.PI * 2);
-  ctx.fill();
+  // The air, FIRST, because the ground is drawn over it: a two-dimensional world's atmosphere is an annulus
+  // standing off its rim, and everything alive lives at the bottom of it.
+  paintAir(ctx, cx, cy, r, t, s);
 
   if (isGiant(t.cls)) {
+    // A giant has no rim to stand on: it is gas all the way down, so its disc IS the picture.
+    ctx.fillStyle = css(s.sea);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r, 0, Math.PI * 2);
+    ctx.fill();
     paintBands(ctx, cx, cy, r, t, id, s);
+    const w = outlineWidth(r, 3);
+    if (w > 0) {
+      ctx.lineWidth = w;
+      ctx.strokeStyle = css(s.coast, 0.95);
+      ctx.beginPath();
+      ctx.arc(cx, cy, r, 0, Math.PI * 2);
+      ctx.stroke();
+    }
   } else {
-    paintContinents(ctx, cx, cy, r, t, id, s);
-    paintCaps(ctx, cx, cy, r, t, id, s);
+    /**
+     * A ROCKY WORLD IS A DISC OF ROCK WITH EVERYTHING LIVING ON ITS EDGE.
+     *
+     * `drawPlanetBody` traces the same one-dimensional terrain field that places regions and that a region
+     * plate draws edge on, so the shore you see from orbit is the shore you land on -- and there is no map
+     * projection anywhere, because there is nothing round to project. It draws its own silhouette, because on
+     * a 2D world the silhouette IS the coastline and a separate circle round the outside would contradict it.
+     */
+    drawPlanetBody(ctx, cx, cy, r, id, t);
   }
   paintClouds(ctx, cx, cy, r, t, id, s);
 
@@ -290,37 +182,43 @@ export function drawPlanet(
    *
    * There used to be a hard-edged day/night crescent here -- the cleverest drawing in the file, and the
    * reason a planet read as a rendered ball. A lit crescent and a lit limb are statements about a sphere
-   * under a light, and this is a flat map: a circle with one set face, and everything that happens on it
-   * happening in plain view. The star's identity still reaches every colour on the disc through the tint
-   * in `surfaceColours`, which is where it belongs.
+   * under a light, and this is a flat world: everything that happens on it happens in plain view. The star's
+   * identity still reaches every colour through the tint in `surfaceColours`, which is where it belongs.
    */
-
-  // Cartoon atmosphere: an offset outline, not a fog. Capped, because scaling it with the radius gave a
-  // ten-pixel grey rim that read as the edge of a dinner plate.
-  if (t.atmDensity > 0.15 && r > 5) {
-    // Kept lighter than the silhouette: the ink line is the planet's edge, and a heavier grey ring outside
-    // it stole the read.
-    ctx.lineWidth = Math.min(2.5, Math.max(1, r * 0.016)) * Math.min(1, t.atmDensity);
-    ctx.strokeStyle = css({ h: t.atmHue, s: 0.5, l: 0.7 }, 0.3);
-    ctx.beginPath();
-    ctx.arc(cx, cy, r + ctx.lineWidth, 0, Math.PI * 2);
-    ctx.stroke();
-  }
-
-  // The thick cartoon line, and the whole of the planet's silhouette. In INK -- `s.coast`, a very dark
-  // tinted neutral -- and not a hue-rotated sea colour, which over a warm star came out bright red and read
-  // as a highlighter ring drawn round the planet rather than as the edge of it.
-  const w = outlineWidth(r, 3);
-  if (w > 0) {
-    ctx.lineWidth = w;
-    ctx.strokeStyle = css(s.coast, 0.95);
-    ctx.beginPath();
-    ctx.arc(cx, cy, r, 0, Math.PI * 2);
-    ctx.stroke();
-  }
 
   // Rings last, because face-on they pass over nothing: they are rings AROUND the planet, not across it.
   if (t.hasRings) paintRings(ctx, cx, cy, r, t, s);
+}
+
+/** How far above the surface the air reaches on the thickest-aired world, as a fraction of the radius. */
+const AIR_REACH = 0.085;
+
+/**
+ * The atmosphere: a band of sky standing off the rim, in three flat steps.
+ *
+ * A thin stroke round the outside is what used to be here, and it read as the gold rim of a dinner plate --
+ * because a line says "edge" and what is wanted is "there is somewhere above the ground". Steps rather than a
+ * gradient, for the same reason everything else in the project is stepped: three flat bands read as drawn,
+ * a ramp reads as a render that did not come off.
+ */
+function paintAir(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, t: PlanetTraits, s: Surface): void {
+  const reach = AIR_REACH * Math.min(1, t.atmDensity);
+  if (reach * r < 0.6) return;
+  const sky = skyTone(t);
+  for (let b = 3; b >= 1; b--) {
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * (1 + (reach * b) / 3), 0, Math.PI * 2);
+    ctx.fillStyle = css(sky, 0.34 - b * 0.07);
+    ctx.fill();
+  }
+  // A hairline at the top of the air, so the sky has a lid and the world reads as having an inside.
+  if (r > 40) {
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = css(sky, 0.3);
+    ctx.beginPath();
+    ctx.arc(cx, cy, r * (1 + reach), 0, Math.PI * 2);
+    ctx.stroke();
+  }
 }
 
 /**

@@ -2,6 +2,7 @@ import {
   anchorCellAt,
   childAt,
   makeChild,
+  nearestRim,
   nearestScatter,
   orbitalChildren,
   type ChildRef,
@@ -55,15 +56,41 @@ export function ascendHalf(cam: Camera): void {
   cam.fy = (cam.fy + (sy ? 1 : -1)) * 0.5;
 }
 
-/** Cross into a semantic child, rebasing coordinates into its local space. */
+/**
+ * Cross into a semantic child, rebasing coordinates into its local space.
+ *
+ * A child's frame may be TURNED relative to its parent's -- see ChildRef.spin -- so this is the inverse of the
+ * child-to-parent map in full: undo the offset, undo the rotation, undo the scale. The rotation is the only
+ * step here that is not exact in float64, and it happens once per semantic descent at a frame radius of about
+ * 220 px, so a full in-and-out round trip loses on the order of 1e-14 px. The budget is 0.01 px.
+ */
 export function enterChild(cam: Camera, ref: ChildRef): void {
   const [px, py] = frameToNode(cam, cam.fx, cam.fy);
   cam.node = makeChild(cam.node, ref);
   cam.k = 0;
   cam.cx = 0;
   cam.cy = 0;
-  cam.fx = (px - ref.ox) / ref.rel;
-  cam.fy = (py - ref.oy) / ref.rel;
+  const dx = px - ref.ox;
+  const dy = py - ref.oy;
+  if (ref.spin === 0) {
+    cam.fx = dx / ref.rel;
+    cam.fy = dy / ref.rel;
+    return;
+  }
+  const c = Math.cos(ref.spin);
+  const sn = Math.sin(ref.spin);
+  cam.fx = (c * dx + sn * dy) / ref.rel;
+  cam.fy = (-sn * dx + c * dy) / ref.rel;
+}
+
+/** A point in a child's local units, expressed in its parent's: scale, then turn, then offset. */
+export function childToParent(ref: ChildRef, lx: number, ly: number): [number, number] {
+  const x = lx * ref.rel;
+  const y = ly * ref.rel;
+  if (ref.spin === 0) return [ref.ox + x, ref.oy + y];
+  const c = Math.cos(ref.spin);
+  const sn = Math.sin(ref.spin);
+  return [ref.ox + c * x - sn * y, ref.oy + sn * x + c * y];
 }
 
 /**
@@ -79,8 +106,7 @@ export function ascend(cam: Camera, tree: Tree): boolean {
   const ref = tree.refOf(cam.node);
   if (!parent || !ref) return false;
   // At k === 0 the frame IS the node, so fx/fy are already in node units.
-  const nx = ref.ox + cam.fx * ref.rel;
-  const ny = ref.oy + cam.fy * ref.rel;
+  const [nx, ny] = childToParent(ref, cam.fx, cam.fy);
   cam.node = parent;
   setNodeCoords(cam, nx, ny);
   return true;
@@ -111,6 +137,17 @@ export function pickEnterableChild(cam: Camera, rEnter: number): ChildRef | null
 
   if (level.placement === 'scatter') {
     const ref = nearestScatter(cam.node, nx, ny);
+    if (!ref) return null;
+    if (ref.rel * scale < rEnter) return null;
+    const dx = nx - ref.ox;
+    const dy = ny - ref.oy;
+    return dx * dx + dy * dy <= ref.rel * ref.rel ? ref : null;
+  }
+
+  if (level.placement === 'rim') {
+    // Searching outwards from the slot under the camera, because the nearest slot is very often empty: half a
+    // planet's rim can be ocean, and an ocean slot holds nothing to enter.
+    const ref = nearestRim(cam.node, nx, ny);
     if (!ref) return null;
     if (ref.rel * scale < rEnter) return null;
     const dx = nx - ref.ox;
@@ -167,8 +204,7 @@ export function absolutePosition(cam: Camera, tree: Tree): [number, number] {
     const ref = tree.refOf(node);
     const parent = tree.parentOf(node);
     if (!ref || !parent) break;
-    nx = ref.ox + nx * ref.rel;
-    ny = ref.oy + ny * ref.rel;
+    [nx, ny] = childToParent(ref, nx, ny);
     node = parent;
   }
   return [nx, ny];

@@ -8,6 +8,8 @@ import {
   makeChild,
   orbitCount,
   orbitalChildren,
+  rimCells,
+  rimChild,
   rootNode,
   type Cell,
   type Node,
@@ -124,9 +126,10 @@ test('two trees with the same seed agree; different seeds do not', () => {
 
 test('children stay wholly inside their own anchor cell', () => {
   // Cells must be independent for O(1) lookup to be correct: a child spilling into a neighbour would
-  // make "what is under the camera" ambiguous.
+  // make "what is under the camera" ambiguous. Grid levels only -- rim levels tile a surface rather than
+  // filling a square, and their invariant is the one asserted below.
   const tree = new Tree(0x2b2b);
-  for (const kind of ['field', 'cluster', 'planet', 'settlement'] as const) {
+  for (const kind of ['field', 'cluster'] as const) {
     const node = firstNodeOfKind(tree, kind);
     if (!node) continue;
     const k = anchorLevel(kind);
@@ -154,9 +157,9 @@ test('children stay wholly inside their own anchor cell', () => {
 
 test('children never escape their parent disc', () => {
   // The renderer draws a node as a disc, so a child outside that disc is a visible lie -- and it
-  // would also break pickEnterableChild, which assumes containment.
+  // would also break pickEnterableChild, which assumes containment. Grid levels only, for the reason above.
   const tree = new Tree(0x9f9f);
-  for (const kind of ['field', 'cluster', 'region', 'settlement'] as const) {
+  for (const kind of ['field', 'cluster'] as const) {
     const node = firstNodeOfKind(tree, kind);
     if (!node) continue;
     const k = anchorLevel(kind);
@@ -174,6 +177,50 @@ test('children never escape their parent disc', () => {
       }
     }
     assert.ok(checked > 0, `expected to find some ${kind} children to check`);
+  }
+});
+
+/**
+ * Rim children TILE their parent's surface, and the containment rule is different because the geometry is.
+ *
+ * A region straddles its planet's rim -- half of it is sky -- so "inside the parent's disc" is exactly the wrong
+ * test there and the square-grid version of it rejected every region on every world. What has to hold instead is
+ * that the slots meet with no gap and no overlap along the surface, because that is what makes the ground
+ * continuous and what makes "which slot is under the camera" a floor division.
+ */
+test('rim children tile their parent surface exactly', () => {
+  const tree = new Tree(0x71b0);
+  for (const kind of ['planet', 'region', 'settlement'] as const) {
+    const node = firstNodeOfKind(tree, kind);
+    if (!node) continue;
+    const count = rimCells(node);
+    assert.ok(count >= 2 && Number.isInteger(Math.log2(count)), `${kind} has ${count} rim slots`);
+
+    let prev: number | null = null;
+    let checked = 0;
+    for (let i = 0; i < Math.min(count, 200); i++) {
+      const c = rimChild(node, i);
+      assert.ok(c, `${kind} rim slot ${i} is empty; every stretch of ground is a real place`);
+      checked++;
+      // The slot's own half-width along the surface, which the child's radius has to match.
+      const half = kind === 'planet' ? (Math.PI * Math.hypot(c.ox, c.oy)) / count : 1 / count;
+      assert.ok(
+        Math.abs(c.rel - half) < 1e-9 * Math.max(1, half),
+        `${kind} slot ${i}: child radius ${c.rel} does not fill its slot ${half}`,
+      );
+      // Consecutive slots are exactly one slot apart along the surface, so they abut with nothing between.
+      const along = kind === 'planet' ? Math.atan2(c.oy, c.ox) : c.ox;
+      if (prev !== null && kind !== 'planet') {
+        assert.ok(
+          Math.abs(along - prev - 2 / count) < 1e-12,
+          `${kind} slot ${i} is ${along - prev} from its neighbour, not ${2 / count}`,
+        );
+      }
+      prev = along;
+      // Below a planet a child sits ON the ground line, and the ground has to stay inside the frame.
+      if (kind !== 'planet') assert.ok(Math.abs(c.oy) + c.rel <= 1 + 1e-12, `${kind} slot ${i} is off its parent`);
+    }
+    assert.ok(checked > 1, `expected to walk some ${kind} rim slots`);
   }
 });
 
