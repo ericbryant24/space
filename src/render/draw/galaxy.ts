@@ -105,6 +105,26 @@ function ribbon(ctx: CanvasRenderingContext2D, spine: readonly SpinePoint[], sca
     }
   };
   side(1);
+  /**
+   * A POINT AT THE TIP, not a blunt end.
+   *
+   * The arm is widest exactly where it stops, because the taper grows outward and the spine is cut off at the
+   * rim -- so the ribbon closed with a straight edge a full arm's width across, square to the sweep, with two
+   * sharp corners. It read as a strap that had been snipped off, which is the one shape a spiral arm is not.
+   *
+   * The point is added to the DRAWING only. The width itself is shared with `armDensity`, which is what the
+   * catalogued stars are rejection-sampled against, and narrowing that would move every star near the rim --
+   * which is to say it would change their addresses, and every permalink to one. Extending the outline by one
+   * width along the tangent closes the cap without touching where anything lives.
+   */
+  const tip = spine[spine.length - 1]!;
+  const before = spine[Math.max(0, spine.length - 2)]!;
+  const tx = tip.x - before.x;
+  const ty = tip.y - before.y;
+  const len = Math.hypot(tx, ty);
+  if (len > 1e-9) {
+    ctx.lineTo(cx + (tip.x + (tx / len) * tip.w) * scale, cy + (tip.y + (ty / len) * tip.w) * scale);
+  }
   side(-1);
   ctx.closePath();
 }
