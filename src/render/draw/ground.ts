@@ -1,6 +1,6 @@
 import { RELIEF, detailForScale, groundAt, seaRadiusOf } from '../../culture/terrain.ts';
 import { climateAt } from '../../culture/climate.ts';
-import { atLuminance, css, luminanceOf, shade, type Hsl } from '../color.ts';
+import { atLuminance, css, luminanceOf, mixHsl, shade, type Hsl } from '../color.ts';
 import { outlineWidth, smoothstep } from '../bands.ts';
 import { LEVELS } from '../../universe/schema.ts';
 import { angleAtOffset, groundHeightAt, seaHeightOf, type Ground, type Node } from '../../universe/node.ts';
@@ -55,6 +55,23 @@ const OVERDRAW = 1.05;
  * at the moment the handover happens. See PLANET_MAX_DIAGONALS in renderer.ts for the other half.
  */
 export const PLATE_RIND = 0.16;
+
+/**
+ * How much further out each layer of a plate reaches than the one under it, in screen pixels.
+ *
+ * A pixel and a half: enough that no two layers share an antialiased column, small enough that the strip a plate
+ * paints over its neighbour's finished ground is thinner than the ink line. See the note on staggering in
+ * `drawSurfacePlate`.
+ */
+const LAYER_BLEED_PX = 1.5;
+
+/** Painting order of a plate's tiling fills. Later layers reach further; nothing else depends on the numbers. */
+const LAYER_ROCK = 0;
+const LAYER_BEDS = 1;
+const LAYER_SKIN = 2;
+const LAYER_SEA = 3;
+const LAYER_SHALLOW = 4;
+const LAYER_INK = 5;
 
 /** Concentric steps down through a planet's interior. Three, because three flat steps read as depth. */
 const INTERIOR_BANDS = 3;
@@ -231,6 +248,54 @@ export function drawSurfacePlate(
   const line = groundLine(g, detail, samples, from, to);
 
   /**
+   * EVERY LAYER RUNS A LITTLE FURTHER PAST THE PLATE THAN THE ONE BELOW IT.
+   *
+   * The seam story again, one level down, and it took a detector to find. Bounding every fill by the ground line
+   * removed the seams between the rock of one plate and the rock of the next: their side edges antialias against
+   * the same colour either side, so there is nothing to see. That is not enough for the fills drawn OVER the
+   * rock. A plate paints rock, then beds, then the skin, then water -- and when they all end at the same column,
+   * that column gets a fraction of each: the bed blended with the plate's own rock beneath it, the water with its
+   * own sea bed. The result is a single column three to eight levels off, down the whole height of the picture,
+   * at the leading edge of every plate. Faint, structural, and impossible to unsee.
+   *
+   * A plain overlap cannot fix it, because the plate to the left was drawn first and does not come back over the
+   * top. Staggering does. Layer k stops a pixel and a half further out than layer k-1, so at the column where a
+   * layer's edge is being antialiased, every layer below it has already stopped -- the thing underneath is the
+   * NEIGHBOUR'S finished ground, which at that column is the same layer in the same colour, because both plates
+   * read the same field. Blending a colour with itself is invisible. And every later layer reaches further still,
+   * so it covers that column outright.
+   *
+   * `tools/seam-check.ts` is what caught it and what keeps it caught.
+   */
+  const bleed = (layer: number) => ((layer + 1) * LAYER_BLEED_PX) / Math.max(1e-9, r);
+
+  /**
+   * The ground line across the plate at `drop` below it, bled out to one layer's reach at both ends, as screen
+   * points. The bled ends are SAMPLED rather than carried sideways from the last point: extending flat would put
+   * a notch in the neighbour's finished ground wherever the slope is steep, which is the same defect in a hat.
+   */
+  const strip = (layer: number, drop: number): Float64Array => {
+    const b = bleed(layer);
+    const out = new Float64Array((samples + 2) * 2);
+    const dy = drop * r;
+    out[0] = toX(from - b);
+    out[1] = toY(groundHeightAt(g, from - b, detail)) + dy;
+    for (let i = 0; i < samples; i++) {
+      out[(i + 1) * 2] = toX(line[i * 2]!);
+      out[(i + 1) * 2 + 1] = toY(line[i * 2 + 1]!) + dy;
+    }
+    out[(samples + 1) * 2] = toX(to + b);
+    out[(samples + 1) * 2 + 1] = toY(groundHeightAt(g, to + b, detail)) + dy;
+    return out;
+  };
+  const forwards = (p: Float64Array, a = 0, b = samples + 1): void => {
+    for (let i = a; i <= b; i++) ctx.lineTo(p[i * 2]!, p[i * 2 + 1]!);
+  };
+  const backwards = (p: Float64Array, a = 0, b = samples + 1): void => {
+    for (let i = b; i >= a; i--) ctx.lineTo(p[i * 2]!, p[i * 2 + 1]!);
+  };
+
+  /**
    * The water line, clamped to what the plate can paint.
    *
    * Unclamped it is unbounded: the sea's depth in LOCAL units grows by the frame's own scale factor at every rung,
@@ -245,10 +310,11 @@ export function drawSurfacePlate(
 
   /** A path bounded above by the ground line and below by the plate's reach: everything solid. */
   const rockPath = (): void => {
+    const p = strip(LAYER_ROCK, 0);
     ctx.beginPath();
-    ctx.moveTo(toX(from), toY(-reach));
-    for (let i = 0; i < samples; i++) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]!));
-    ctx.lineTo(toX(to), toY(-reach));
+    ctx.moveTo(p[0]!, toY(-reach));
+    forwards(p);
+    ctx.lineTo(p[(samples + 1) * 2]!, toY(-reach));
     ctx.closePath();
   };
 
@@ -286,10 +352,13 @@ export function drawSurfacePlate(
     // downwards, exactly as a geometric family must, and the picture reads as layers rather than as ruled lines.
     const bottom = Math.min(reach + 1, top * 2);
     ctx.beginPath();
-    for (let i = 0; i < samples; i++) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]! - top));
-    for (let i = samples - 1; i >= 0; i--) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]! - bottom));
+    forwards(strip(LAYER_BEDS, top));
+    backwards(strip(LAYER_BEDS, bottom));
     ctx.closePath();
-    ctx.fillStyle = css(stratumTone(rock, g.planetId, bed.index), bed.alpha);
+    // OPAQUE, with the fade in the colour rather than in the alpha. A translucent fill laid twice over the same
+    // ground -- which is what the overlap between two plates is -- does not match one laid once, so it seams. See
+    // `mixHsl`.
+    ctx.fillStyle = css(mixHsl(rock, stratumTone(rock, g.planetId, bed.index), bed.alpha));
     ctx.fill();
   }
 
@@ -316,10 +385,18 @@ export function drawSurfacePlate(
     (i) => g.baseRadius + line[i * 2 + 1]! * g.span,
     beachDepth(g.traits, r, metresPerUnit) * g.span,
   );
+  const skinTop = strip(LAYER_SKIN, 0);
+  const skinBase = strip(LAYER_SKIN, depth);
   for (const run of runs) {
+    /**
+     * Only the ends of the PLATE bleed. A boundary between two materials inside it is a real edge -- a snow line,
+     * the top of a beach -- and the one kind of edge in this painter that is allowed to be visible.
+     */
+    const a = run.from === 0 ? 0 : run.from + 1;
+    const b = run.to === samples - 1 ? samples + 1 : run.to + 1;
     ctx.beginPath();
-    for (let i = run.from; i <= run.to; i++) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]!));
-    for (let i = run.to; i >= run.from; i--) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]! - depth));
+    forwards(skinTop, a, b);
+    backwards(skinBase, a, b);
     ctx.closePath();
     ctx.fillStyle = css(daylight(materialTone(run.material, run.biome, s, g.traits, ore), sky, shadowHue));
     ctx.fill();
@@ -338,26 +415,22 @@ export function drawSurfacePlate(
    */
   if (wet) {
     const seaTone = daylight(s.sea, sky, shadowHue);
+    const seaY = toY(sea);
+    const bed = strip(LAYER_SEA, 0);
     ctx.beginPath();
-    ctx.moveTo(toX(from), toY(sea));
-    ctx.lineTo(toX(to), toY(sea));
-    for (let i = samples - 1; i >= 0; i--) {
-      ctx.lineTo(toX(line[i * 2]!), toY(Math.min(sea, line[i * 2 + 1]!)));
-    }
+    ctx.moveTo(toX(from - bleed(LAYER_SEA)), seaY);
+    ctx.lineTo(toX(to + bleed(LAYER_SEA)), seaY);
+    for (let i = samples + 1; i >= 0; i--) ctx.lineTo(bed[i * 2]!, Math.max(seaY, bed[i * 2 + 1]!));
     ctx.closePath();
     ctx.fillStyle = css(seaTone);
     ctx.fill();
 
     const shallow = Math.max(2 / r, depth * 2.2);
+    const floor = strip(LAYER_SHALLOW, 0);
+    const shelf = strip(LAYER_SHALLOW, -shallow);
     ctx.beginPath();
-    for (let i = 0; i < samples; i++) {
-      const v = Math.min(sea, line[i * 2 + 1]!);
-      ctx.lineTo(toX(line[i * 2]!), toY(v));
-    }
-    for (let i = samples - 1; i >= 0; i--) {
-      const v = Math.min(sea, line[i * 2 + 1]! + shallow);
-      ctx.lineTo(toX(line[i * 2]!), toY(v));
-    }
+    for (let i = 0; i <= samples + 1; i++) ctx.lineTo(floor[i * 2]!, Math.max(seaY, floor[i * 2 + 1]!));
+    for (let i = samples + 1; i >= 0; i--) ctx.lineTo(shelf[i * 2]!, Math.max(seaY, shelf[i * 2 + 1]!));
     ctx.closePath();
     ctx.fillStyle = css(atLuminance(seaTone, Math.min(0.72, luminanceOf(seaTone) + 0.16)));
     ctx.fill();
@@ -378,13 +451,10 @@ export function drawSurfacePlate(
    * and the coastline disappeared from the world. The disc does use the ramp, and the two agree, because at the
    * moment the disc hands over it is several screens across and the ramp has long since saturated.
    */
+  const inkLine = strip(LAYER_INK, 0);
   ctx.beginPath();
-  for (let i = 0; i < samples; i++) {
-    const px = toX(line[i * 2]!);
-    const py = toY(line[i * 2 + 1]!);
-    if (i === 0) ctx.moveTo(px, py);
-    else ctx.lineTo(px, py);
-  }
+  ctx.moveTo(inkLine[0]!, inkLine[1]!);
+  forwards(inkLine, 1);
   ctx.lineWidth = GROUND_INK_PX;
   ctx.strokeStyle = css(daylight(s.coast, sky, shadowHue));
   ctx.stroke();
@@ -570,7 +640,7 @@ export function drawPlanetBody(
     for (let i = 0; i <= samples; i++) ctx.lineTo(px(i, rad[i]! - bed.depth), py(i, rad[i]! - bed.depth));
     for (let i = samples; i >= 0; i--) ctx.lineTo(px(i, rad[i]! - bottom), py(i, rad[i]! - bottom));
     ctx.closePath();
-    ctx.fillStyle = css(stratumTone(rock, id, bed.index), bed.alpha);
+    ctx.fillStyle = css(mixHsl(rock, stratumTone(rock, id, bed.index), bed.alpha));
     ctx.fill();
   }
 

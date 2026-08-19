@@ -157,7 +157,9 @@ export function computeSky(
     const periodS = 900 + f01(hash3(planetId, 0x31b, i)) * 2600;
     clouds.push({
       y: horizonY - lift * height,
-      h: Math.max(2, viewH * (0.012 + f01(hash3(planetId, 0x31c, i)) * 0.026)),
+      // A cloud is about a twentieth of the sky tall and five or six times that wide, which is roughly what a
+      // fair-weather cumulus looks like from underneath and, more to the point, is big enough to read.
+      h: Math.max(3, viewH * (0.026 + f01(hash3(planetId, 0x31c, i)) * 0.04)),
       drift: ((seconds / periodS + f01(hash3(planetId, 0x31d, i))) % 1) * (viewW + 600) - 300,
     });
   }
@@ -281,17 +283,28 @@ export function paintSky(ctx: CanvasRenderingContext2D, sky: Sky, x0: number, x1
       Math.min(0.95, luminanceOf(sky.colour) * 1.6 + 0.14),
     );
     ctx.fillStyle = css(tone, 0.5 + 0.28 * (1 - sky.night));
+    /**
+     * THE LOBES HAVE TO OVERLAP, which is the whole difference between a cloud and a handful of confetti.
+     *
+     * They did not. The lobes were spread over four radii of spacing and drawn at about one radius, so every
+     * cloud came out as three or four separate circles scattered across the sky -- polka dots, at every zoom,
+     * on every world. Spacing a little under the radius makes the discs merge into one lumpy mass, and since
+     * they are filled as a single path the overlaps do not show even at partial alpha.
+     */
     for (let ci = 0; ci < sky.clouds.length; ci++) {
       const c = sky.clouds[ci]!;
-      const lobes = 3 + (ci % 3);
-      const spanX = c.h * (2.2 + lobes * 1.4);
+      const lobes = 4 + (ci % 4);
+      const step = c.h * 0.74;
+      const spanX = step * (lobes - 1) * 0.5 + c.h * 1.2;
       if (c.drift + spanX < x0 || c.drift - spanX > x1) continue;
       ctx.beginPath();
       for (let i = 0; i < lobes; i++) {
-        const t = (i + 0.5) / lobes;
-        const lx = c.drift + (t - 0.5) * spanX * 2;
-        const ly = c.y + Math.sin(i * 2.3 + ci) * c.h * 0.35;
-        const lr = c.h * (0.7 + 0.5 * Math.sin(i * 1.7 + ci * 2));
+        const lx = c.drift + (i - (lobes - 1) / 2) * step;
+        // A shallow arch: fatter and higher in the middle, thinning to the ends, which is the shape of a cloud
+        // rather than a caterpillar.
+        const t = 1 - Math.abs(i - (lobes - 1) / 2) / Math.max(0.5, (lobes - 1) / 2);
+        const ly = c.y - t * c.h * 0.3 + Math.sin(i * 2.3 + ci) * c.h * 0.12;
+        const lr = c.h * (0.5 + 0.62 * t) * (0.85 + 0.3 * Math.sin(i * 1.7 + ci * 2));
         ctx.moveTo(lx + lr, ly);
         ctx.arc(lx, ly, lr, 0, Math.PI * 2);
       }

@@ -1,7 +1,7 @@
 import { makePalette, voidBackground, type Palette } from '../culture/palette.ts';
 import type { Node } from '../universe/node.ts';
 import type { Tree } from '../universe/tree.ts';
-import { css as cssColor, hueDelta, luminanceOf, solveL, type Hsl } from './color.ts';
+import { css as cssColor, mixHsl, type Hsl } from './color.ts';
 import { smoothstep } from './bands.ts';
 
 export const css = cssColor;
@@ -36,16 +36,6 @@ function containerVoid(node: Node, tree: Tree): Hsl {
   return voidBackground(cosmicPaletteOf(node.id));
 }
 
-/** Shortest way round the hue circle, holding luminance rather than lightness, like everything else here. */
-function mix(a: Hsl, b: Hsl, t: number): Hsl {
-  if (t <= 0) return a;
-  if (t >= 1) return b;
-  const h = a.h + hueDelta(a.h, b.h) * t;
-  const s = a.s + (b.s - a.s) * t;
-  const y = luminanceOf(a) + (luminanceOf(b) - luminanceOf(a)) * t;
-  return { h, s, l: solveL(h, s, y) };
-}
-
 /**
  * Space-mode background, so that different regions of the universe are tinted differently rather than all
  * sharing one flat near-black.
@@ -64,5 +54,5 @@ export function voidBackgroundFor(node: Node, tree: Tree, nodePx: number, diagon
   const inner = containerVoid(node, tree);
   const parent = tree.parentOf(node);
   if (!parent) return inner;
-  return mix(containerVoid(parent, tree), inner, smoothstep(0.5 * diagonal, 2 * diagonal, nodePx));
+  return mixHsl(containerVoid(parent, tree), inner, smoothstep(0.5 * diagonal, 2 * diagonal, nodePx));
 }

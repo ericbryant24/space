@@ -113,3 +113,21 @@ export function shade(c: Hsl, shadowHue: number, strength = 1): Hsl {
 export function atLuminance(c: Hsl, y: number): Hsl {
   return { h: c.h, s: c.s, l: solveL(c.h, c.s, y) };
 }
+
+/**
+ * Between two colours, holding LUMINANCE rather than lightness.
+ *
+ * The one blend in the project, and it exists mostly so that a fade can be done in the colour rather than in the
+ * alpha. Alpha is not available to anything that TILES: two plates overlap by a few pixels, and a fill at alpha
+ * 0.7 laid twice over the same ground is not the same as one laid once, so every partially transparent fill on a
+ * plate leaves a one-pixel column down the whole height of the picture at the plate's leading edge. Mixing to the
+ * colour underneath and filling opaque is the same picture with none of that.
+ */
+export function mixHsl(a: Hsl, b: Hsl, t: number): Hsl {
+  if (t <= 0) return a;
+  if (t >= 1) return b;
+  const h = a.h + hueDelta(a.h, b.h) * t;
+  const s = a.s + (b.s - a.s) * t;
+  const y = luminanceOf(a) + (luminanceOf(b) - luminanceOf(a)) * t;
+  return { h, s, l: solveL(h, s, y) };
+}
