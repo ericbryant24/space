@@ -301,7 +301,17 @@ export function render(
     const sn = ref.spin === 0 ? 0 : Math.sin(ref.spin);
     const px = (ax * c + ay * sn) / ref.rel;
     const py = (ay * c - ax * sn) / ref.rel;
-    if (!worthClimbing(LEVELS[parent.kind].placement, Math.hypot(ax, ay) * r, Math.hypot(px, py) * r, limit, diagonal)) {
+    /**
+     * How far the camera is from the middle of the node we are standing in, in pixels.
+     *
+     * A rim plate is kept or dropped by whether it COVERS THE WINDOW, and size alone cannot answer that: a
+     * settlement sixty-four buildings wide is seven screens across, so by size it plainly covers -- but standing
+     * at its first building the whole of it is off to one side and there is nothing painting the ground the other
+     * way. That left a wedge of bare sky below the horizon at every plate edge, which is exactly where you end up
+     * whenever you walk to the end of a village.
+     */
+    const offPx = Math.hypot(centreX - cam.fx, centreY - cam.fy) * r;
+    if (!worthClimbing(LEVELS[parent.kind].placement, Math.hypot(ax, ay) * r, Math.hypot(px, py) * r, limit, diagonal, offPx)) {
       break;
     }
     centreX -= px * ref.ox - py * ref.oy;
@@ -410,9 +420,10 @@ function worldTurn(cam: Camera, tree: Tree, up: number): number {
  * which is close enough to the general limit that whether your neighbours existed came down to how lumpy the
  * ground happened to be where you were standing.
  *
- * So a rim parent is kept for exactly as long as its children are smaller than the screen, which is exactly as
- * long as their siblings can be seen. Above that the child covers the window on its own and there is nothing
- * beside it to paint.
+ * So a rim parent is kept for exactly as long as its children do not COVER THE WINDOW -- measured from where the
+ * camera actually is rather than from the plate's width, because a plate seven screens across still leaves half
+ * the window empty if you are standing at its end. Above that the child fills the window on its own and there is
+ * nothing beside it to paint.
  */
 function worthClimbing(
   placement: string,
@@ -420,8 +431,11 @@ function worthClimbing(
   parentPx: number,
   limit: number,
   diagonal: number,
+  offPx: number,
 ): boolean {
-  if (placement === 'rim') return childPx < MAX_SELF_DRAW_DIAGONALS * diagonal;
+  // `childPx - offPx` is how far the child reaches PAST the camera on its near side. That, and not its width, is
+  // what decides whether anything else has to be painted beside it.
+  if (placement === 'rim') return childPx - offPx < MAX_SELF_DRAW_DIAGONALS * diagonal;
   return parentPx <= limit;
 }
 
