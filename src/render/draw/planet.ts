@@ -708,8 +708,16 @@ export const ORBIT_RING_LUMINANCE = 0.38;
 export function drawOrbitRing(ctx: CanvasRenderingContext2D, cx: number, cy: number, radiusPx: number, colour: Hsl): void {
   const appear = smoothstep(ORBIT_RING_FADE_PX[0], ORBIT_RING_FADE_PX[1], radiusPx);
   if (appear <= 0) return;
-  ctx.lineWidth = 1;
-  ctx.strokeStyle = css(colour, 0.2 * appear);
+  /**
+   * Faint, but not so faint that its colour cannot be read.
+   *
+   * At a fifth of an alpha over the void the hue was gone and every orbit was the same grey hairline, which
+   * defeats the point of colouring them: the ring is what says which world rides it before that world is
+   * anything but a dot. This is still a survey annotation rather than a wall -- you have to look at it to see
+   * it -- but looking at it now tells you something.
+   */
+  ctx.lineWidth = 1.2;
+  ctx.strokeStyle = css(colour, 0.44 * appear);
   ctx.beginPath();
   ctx.arc(cx, cy, radiusPx, 0, Math.PI * 2);
   ctx.stroke();
