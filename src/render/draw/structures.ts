@@ -72,6 +72,18 @@ const HOUSE_FADE_FULL = 4.6;
 /** Tallest a building gets, as a multiple of its own width, whatever its world's grammar says. */
 const MAX_ASPECT = 2.4;
 
+/**
+ * And however tall that comes out, nothing stands more than this many frame radii above the ground.
+ *
+ * A building's frame is sized by its FOOTPRINT -- its slot along the rim -- so a world whose grammar builds
+ * tall produced buildings two and a half frames high, and at the size the camera settles on them that is a
+ * plain wall from the bottom of the screen to the top with no roof, no eave and no sky. Which is worse than
+ * losing the drama, because the roof is where a world states its climate: pitch, overhang, chimney, snow. This
+ * only ever binds on the ones that were unreadable -- anything under about one and a third frames is left
+ * exactly as its grammar built it.
+ */
+const BUILDING_TOP = 1.35;
+
 /** Clear space a mark needs before the next one, as a multiple of its own width, to read as separate. */
 const MARK_SPACING = 1.7;
 
@@ -291,7 +303,7 @@ function building(
     const sat = 0.1 + dark * 0.26;
     const wall = daylight({ h: ore.hue, s: sat, l: solveL(ore.hue, sat, y) }, sky, shadowHue);
     const storeyH = half * 2 * arch.verticality * 0.42;
-    const height = Math.min(half * 2 * MAX_ASPECT, storeyH * look.storeys);
+    const height = Math.min(half * 2 * MAX_ASPECT, r * BUILDING_TOP, storeyH * look.storeys);
     const rise = half * arch.pitch;
 
     ctx.fillStyle = css(wall);
@@ -343,6 +355,7 @@ function building(
       oreHue: ore.hue,
       metallicity: ore.metallicity,
       civic: look.roof === arch.roofCivic && arch.roofCivic !== arch.roof,
+      maxHeight: Math.min(half * 2 * MAX_ASPECT, r * BUILDING_TOP),
       id,
       planetId: g.planetId,
     };

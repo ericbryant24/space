@@ -50,6 +50,15 @@ export interface Facade {
   /** 0 = a metal-poor rim world, 1 = a metal-rich core world. Sets how dark stone reads. */
   readonly metallicity: number;
   readonly civic: boolean;
+  /**
+   * Tallest this building may stand above the ground, in screen pixels.
+   *
+   * A building's frame is sized by its footprint, so a world whose grammar builds tall produced walls that ran
+   * from the bottom of the screen to the top with no roof, no eave and no sky. That is worse than losing the
+   * drama, because the ROOF is where a world states its climate: pitch, overhang, chimney, snow. Set by the
+   * caller from the plate's own radius, and it only ever binds on the ones that were unreadable.
+   */
+  readonly maxHeight: number;
   readonly id: number;
   readonly planetId: number;
 }
@@ -303,8 +312,19 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
    * given footprint, and the storey count is one of the three things a building is allowed to choose for
    * itself. A village therefore has one skyline rather than a random one.
    */
-  const storeyH = half * 2 * arch.verticality * 0.42;
-  const height = storeyH * look.storeys;
+  /**
+   * Storeys, and how many of them actually fit.
+   *
+   * `verticality` is how tall this world builds for a given footprint and the storey count is one of the three
+   * things a building chooses for itself, so the natural height is the product. Where that is more than the
+   * frame will hold (see Facade.maxHeight) the building loses floors rather than being squashed: a five-storey
+   * grammar on a narrow plot becomes three storeys of the same height, which is what happens on a narrow plot.
+   * Squashing instead would have put the window rows, the floor lines and the banding above the roof.
+   */
+  const natural = half * 2 * arch.verticality * 0.42;
+  const storeys = Math.max(1, Math.min(look.storeys, Math.round(f.maxHeight / Math.max(1e-6, natural))));
+  const height = Math.min(f.maxHeight, natural * look.storeys);
+  const storeyH = height / storeys;
   const eaveY = groundY - height;
   const over = half * arch.eave;
   const w = Math.max(0.9, Math.min(3, half * 0.055));
@@ -331,16 +351,16 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
   ctx.fillStyle = css(p.trim);
   switch (arch.wall) {
     case 'banded':
-      for (let i = 1; i < look.storeys * 2; i++) {
-        ctx.fillRect(cx - half, eaveY + (height * i) / (look.storeys * 2) - w * 0.6, half * 2, w * 1.2);
+      for (let i = 1; i < storeys * 2; i++) {
+        ctx.fillRect(cx - half, eaveY + (height * i) / (storeys * 2) - w * 0.6, half * 2, w * 1.2);
       }
       break;
     case 'timbered':
       ctx.strokeStyle = css(p.ink, 0.7);
       ctx.lineWidth = w;
       ctx.beginPath();
-      for (let i = 0; i <= look.storeys; i++) {
-        const y = eaveY + (height * i) / look.storeys;
+      for (let i = 0; i <= storeys; i++) {
+        const y = eaveY + (height * i) / storeys;
         ctx.moveTo(cx - half, y);
         ctx.lineTo(cx + half, y);
       }
@@ -375,12 +395,24 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
   }
 
   // 5. Windows, in the world's own silhouette and the world's own rhythm.
-  const winW = half * 2 * Math.sqrt(arch.windowArea) * 0.7;
-  const winH = winW * (look.window === 'tall' || look.window === 'slit' ? 1.7 : look.window === 'square' ? 1 : 1.28);
-  if (winW > 1.6 && winH < storeyH * 0.86) {
+  /**
+   * Window size, SHRUNK to fit the storey rather than abandoned when it does not.
+   *
+   * `windowArea` is how much glass this world puts in a wall and the shape decides how that area is spent, so a
+   * tall-window world on a squat storey asked for a window taller than the floor it sits in. The old test threw
+   * the whole grid away in that case, and a blank wall says nothing at all -- where a smaller window of the
+   * world's own shape still says the shape, the rhythm and the motif. Both dimensions scale together, so the
+   * silhouette that carries the motif is unchanged.
+   */
+  const shape = look.window === 'tall' || look.window === 'slit' ? 1.7 : look.window === 'square' ? 1 : 1.28;
+  const want = half * 2 * Math.sqrt(arch.windowArea) * 0.7;
+  const fit = Math.min(1, (storeyH * 0.72) / Math.max(1e-6, want * shape));
+  const winW = want * fit;
+  const winH = winW * shape;
+  if (winW > 1.6) {
     ctx.globalAlpha = part(winW, 1.6, 3.4);
     const cols = Math.max(1, look.bays * (arch.rhythm === 'grouped' ? 2 : 1));
-    for (let s = 0; s < look.storeys; s++) {
+    for (let s = 0; s < storeys; s++) {
       // The ground floor gives its middle bay to the door.
       const rowY = groundY - storeyH * (s + 0.58);
       for (let c = 0; c < cols; c++) {
