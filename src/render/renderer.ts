@@ -53,6 +53,8 @@ const MIN_CHILD_PX = 1.1;
 export const ANCESTOR_LIMIT_DIAGONALS = 64;
 /** Past this the node's own silhouette is off-screen anyway; iterate its children but skip its disc. */
 export const MAX_SELF_DRAW_DIAGONALS = 2.5;
+/** And how far past it the fade runs, for everything that is allowed to fade rather than switch. */
+const SELF_FADE_SPAN = 1.6;
 /**
  * A planet keeps drawing its own body long past the general limit, because that is what paints the ground until its
  * regions take over -- and the two have to meet exactly.
@@ -153,11 +155,17 @@ export interface RenderStats {
   spritesPending: boolean;
   topKind: Kind;
   /**
-   * How far the scene was turned to put the ground the right way up -- see src/camera/orientation.ts.
+   * How far the ENCLOSING WORLD'S frame is turned on screen, in radians, or 0 out in space.
    *
    * Reported because the pop detector's model of a zoom is a pure scale about the screen centre, and through the
-   * arrival at a world that is not the whole transform: the picture also turns. Without knowing by how much, the
-   * detector reads the turn as the biggest pop in the run.
+   * arrival at a world that is not the whole transform: the picture also turns, to put the ground the right way
+   * up (see src/camera/orientation.ts). Without knowing by how much, the detector reads the turn as the biggest
+   * pop in the run.
+   *
+   * The planet's frame rather than the camera's, and the difference matters. The scene rotation applies only
+   * while the camera's focus IS the planet; below it the frame chain carries the same turn instead, so the
+   * camera's own number drops to zero at the moment a region takes focus while the picture does not move at all.
+   * Measured against the world, the two are the same number either side of that step.
    */
   up: number;
   hits: HitEntry[];
@@ -326,7 +334,7 @@ export function render(
   frame.up = upAngleFor(cam, frame.sky ? frame.sky.groundAlpha : 0);
   frame.cosUp = Math.cos(frame.up);
   frame.sinUp = Math.sin(frame.up);
-  stats.up = frame.up;
+  stats.up = worldTurn(cam, tree, frame.up);
 
   // The planet's own disc is reached through the space-mode painter, which has no sky or viewport argument to take
   // one, so it is handed the frame's here instead. See `beginGroundFrame`.
@@ -363,6 +371,26 @@ function childFrame(
  * a planet is genuinely a ten-thousandth of a pixel. Without threading it through, the minimum-size
  * cull discards the very thing a system view exists to show.
  */
+/**
+ * How far the enclosing planet's own frame is turned on screen. See RenderStats.up.
+ *
+ * The scene rotation, less whatever of it the frame chain is already carrying: every rung between the camera and
+ * the planet contributes its own spin, and the renderer's climb divides those out to leave the focus node
+ * upright. Adding them back gives one number that does not care which rung is in focus.
+ */
+function worldTurn(cam: Camera, tree: Tree, up: number): number {
+  let node: Node | null = cam.node;
+  let sum = 0;
+  for (let i = 0; i < 10 && node; i++) {
+    if (node.kind === 'planet') return up - sum;
+    const ref = tree.refOf(node);
+    if (!ref) break;
+    sum += ref.spin;
+    node = tree.parentOf(node);
+  }
+  return up;
+}
+
 /**
  * Whether an ancestor is worth climbing to.
  *
@@ -451,9 +479,30 @@ function paint(
   // A planet holds on to its own surface far longer than anything else, because its regions do not appear
   // until they are big enough to be areas -- see PLANET_MAX_DIAGONALS for both halves of that trade.
   const selfLimit = node.kind === 'planet' ? PLANET_MAX_DIAGONALS : MAX_SELF_DRAW_DIAGONALS;
-  const selfVisible = rPx <= selfLimit * frame.diagonal;
+  /**
+   * HOW STRONGLY A NODE STILL DRAWS ITSELF once it is bigger than the screen.
+   *
+   * A hard cut is right for a RIM parent and only for one: a plate and a disc must never both paint the ground,
+   * so the two conditions have to be exact complements. Everywhere else the cut was simply a pop. A cluster's
+   * wash covers the whole window at two and a half diagonals, and dropping it in one frame changed every pixel
+   * on screen from the cluster's own tint to the void behind it -- the largest single-frame change the pop
+   * detector found anywhere in the descent, and it happened at every container in the field.
+   *
+   * So everything else fades out over the following half-doubling instead. Nothing is lost by keeping it: past
+   * the limit the node's silhouette is off screen in every direction, so what is still being drawn is a flat
+   * fill, which is the cheapest thing there is.
+   */
+  const selfAlpha =
+    level.placement === 'rim'
+      ? rPx <= selfLimit * frame.diagonal
+        ? 1
+        : 0
+      : 1 - smoothstep(selfLimit * frame.diagonal, selfLimit * SELF_FADE_SPAN * frame.diagonal, rPx);
+  const selfVisible = selfAlpha > 1 / 255;
   if (selfVisible) {
     frame.lastDrawnRadius = rPx;
+    const wasAlpha = ctx.globalAlpha;
+    if (selfAlpha < 1) ctx.globalAlpha = wasAlpha * selfAlpha;
     /**
      * The rotation is applied to the CANVAS, not to the coordinates.
      *
@@ -463,6 +512,7 @@ function paint(
      * transform that leaves `lineWidth` in screen pixels, so the thick cartoon outlines survive it untouched.
      */
     drawDisc(frame, node, sx, sy, rPx, trueRPx, schematic, spin);
+    ctx.globalAlpha = wasAlpha;
     stats.draws++;
 
     // Use the radius actually drawn, so a schematic planet is as clickable as it looks.

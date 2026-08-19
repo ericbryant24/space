@@ -43,6 +43,14 @@ const AIM_EVERY = Number(process.env.POP_AIM_EVERY ?? 8);
  */
 const SPIKE = Number(process.env.POP_SPIKE ?? 3.2);
 const FLOOR = Number(process.env.POP_FLOOR ?? 0.012);
+/**
+ * How far a step has to stand above the steps either side of it before it is a discontinuity rather than part
+ * of a transition.
+ *
+ * Two. A crossfade run at any sensible rate moves the picture by roughly the same amount on each of its steps,
+ * so consecutive elevated steps are a ramp; a thing appearing moves one step and only one.
+ */
+const RAMP_MARGIN = Number(process.env.POP_RAMP ?? 2);
 /** How many of the worst steps to write out as before/after PNGs. */
 const KEEP = Number(process.env.POP_KEEP ?? 6);
 
@@ -221,10 +229,34 @@ const main = async () => {
     });
   }
 
-  // Rank the spikes, then go back and capture the worst of them as before/after pairs.
-  const pops = samples
-    .filter((s) => s.residual > FLOOR && s.ratio > SPIKE)
+  /**
+   * A POP IS AN ISOLATED SPIKE. A RAMP IS A CROSSFADE DOING ITS JOB.
+   *
+   * The three tests above -- above the floor, and well above the local median -- catch every step where the
+   * picture changed more than the zoom accounts for. That is not the same as a pop. Arriving at a world is
+   * MEANT to change the picture for a while: the sky fades in, the daylight comes up, the ground turns upright,
+   * a galaxy's arms resolve out of its wash. Those run for six or eight consecutive steps and each one of them
+   * clears the median by ten times, because everything either side of the transition is so quiet.
+   *
+   * What you can SEE is a discontinuity, and a discontinuity is a step that stands out from the steps either
+   * side of it as well as from the run. So a spike is only reported as a pop when it is a local maximum by a
+   * clear margin. The plateaus are still counted and still printed -- a transition that takes eight steps is
+   * worth knowing about -- they are just not called pops, because calling them pops is what would make the
+   * number stop meaning anything.
+   */
+  const isolated = (i: number): boolean => {
+    const r = samples[i]!.residual;
+    const before = samples[i - 1];
+    const after = samples[i + 1];
+    const near = Math.max(before?.residual ?? 0, after?.residual ?? 0);
+    return r > near * RAMP_MARGIN;
+  };
+  const flagged = samples.map((s, i) => ({ s, i })).filter(({ s }) => s.residual > FLOOR && s.ratio > SPIKE);
+  const pops = flagged
+    .filter(({ i }) => isolated(i))
+    .map(({ s }) => s)
     .sort((a, b) => b.ratio * b.residual - a.ratio * a.residual);
+  const ramps = flagged.filter(({ i }) => !isolated(i)).map(({ s }) => s);
 
   const all = samples.map((s) => s.residual).sort((a, b) => a - b);
   const q = (f: number) => all[Math.min(all.length - 1, Math.floor(f * all.length))] ?? 0;
@@ -248,8 +280,27 @@ const main = async () => {
     );
   }
 
+  if (ramps.length) {
+    // Grouped by the level they happen at: a run of them at one level is one transition, not eight faults.
+    const at = new Map<string, { n: number; lo: number; hi: number; worst: number }>();
+    for (const r of ramps) {
+      const e = at.get(r.kind) ?? { n: 0, lo: r.z, hi: r.z, worst: 0 };
+      e.n++;
+      e.lo = Math.min(e.lo, r.z);
+      e.hi = Math.max(e.hi, r.z);
+      e.worst = Math.max(e.worst, r.residual);
+      at.set(r.kind, e);
+    }
+    console.log(`\n${ramps.length} steps inside a transition (elevated, but not a step change):`);
+    for (const [kind, e] of at) {
+      console.log(
+        `  ${kind.padEnd(11)} ${String(e.n).padStart(2)} steps over z ${e.lo.toFixed(2)}..${e.hi.toFixed(2)}, worst ${e.worst.toFixed(4)}`,
+      );
+    }
+  }
+
   if (pops.length) {
-    console.log(`\n${pops.length} spike${pops.length === 1 ? '' : 's'} (residual > ${FLOOR} and > ${SPIKE}x the local median):`);
+    console.log(`\n${pops.length} POP${pops.length === 1 ? '' : 'S'} (isolated: residual > ${FLOOR}, > ${SPIKE}x the local median, and ${RAMP_MARGIN}x its own neighbours):`);
     for (const p of pops.slice(0, 14)) {
       console.log(
         `  ${p.kind.padEnd(11)} z=${p.z.toFixed(2)}  residual ${p.residual.toFixed(4)}  ${p.ratio.toFixed(1)}x median`,

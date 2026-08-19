@@ -98,7 +98,8 @@ export const COAST_DETAIL = 9;
  * is the same mountain seen from its foothills, with more of its texture resolved.
  */
 export function groundAt(planetId: number, traits: PlanetTraits, theta: number, detail: number): number {
-  const top = Math.min(FINEST_LEVEL, Math.max(COARSE_LEVEL, Math.round(detail)));
+  const want = Math.min(FINEST_LEVEL, Math.max(COARSE_LEVEL, detail));
+  const top = Math.floor(want);
 
   // The trig does not depend on the octave, and a surface plate asks for up to thirty of them per sample.
   const ct = Math.cos(theta);
@@ -113,6 +114,25 @@ export function groundAt(planetId: number, traits: PlanetTraits, theta: number, 
     norm += amp;
     amp *= PERSISTENCE;
     f *= 2;
+  }
+  /**
+   * THE FINEST OCTAVE FADES IN. `detail` is a continuous quantity and it must not act like a discrete one.
+   *
+   * Callers work it out from how many pixels a local unit covers, which changes smoothly as you zoom -- and
+   * rounding it to an integer meant that at one particular zoom, on every plate on screen at once, the ground
+   * line gained a whole octave in a single frame. A few pixels of wiggle appearing everywhere simultaneously
+   * is not a subtle artefact: the pop detector found it at the region handover as the second largest
+   * discontinuity in the descent, and the same thing happens at every rung.
+   *
+   * Weighting the last octave by the fraction and adding its amplitude to the normaliser as well keeps the
+   * field's range correct throughout, and lands exactly on the whole-octave value when the fraction reaches
+   * one. The fixed levels placement and climate use are integers, so this changes nothing they see -- which
+   * matters, because those are what a permalink is made of.
+   */
+  const frac = want - top;
+  if (frac > 1e-6 && top < FINEST_LEVEL) {
+    sum += octave(seed, ct, st, f, top + 1) * amp * frac;
+    norm += amp * frac;
   }
   /**
    * Shaped rather than used raw, so mountains have shoulders instead of being a sine wave. `massClass` stands

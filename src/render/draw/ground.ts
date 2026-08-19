@@ -207,7 +207,9 @@ export function drawSurfacePlate(
   const g = node.ground;
   if (!g) return;
   const s = surfaceColours(g.traits);
-  const detail = Math.round(detailForScale((r / g.span) * 2));
+  // Not rounded: `groundAt` takes a fractional level and fades the finest octave in, so the ground line does
+  // not gain a whole octave of wiggle in one frame at some particular zoom. See groundAt.
+  const detail = detailForScale((r / g.span) * 2);
   /**
    * The climate at this plate's own centre.
    *
@@ -513,7 +515,7 @@ export function drawPlanetBody(
 ): void {
   const s = surfaceColours(traits);
   const seaR = seaRadiusOf(id, traits);
-  const detail = Math.round(detailForScale(r));
+  const detail = detailForScale(r);
   const shadowHue = traits.starLight.shadowHue;
   /**
    * Daylight, weighted by how far the arrival has got.
