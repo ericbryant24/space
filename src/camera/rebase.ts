@@ -49,7 +49,13 @@ export const R_LEAVE = 90;
 const RIM_ENTRY_REACH = 1;
 
 /**
- * How far the ground may get before the zoom stops, in screen diagonals.
+ * How far the ground may get before the zoom stops.
+ *
+ * ABOVE it, in units of the window's HEIGHT, because that is the direction the ground leaves in: at a little
+ * over half a height it is at the bottom edge, and past that the picture is nothing but sky. In diagonals -- as
+ * this was -- the ground could get two and a half screen heights below the middle, which is a blank page.
+ * BELOW it, in diagonals, because down there the screen is full of rock and the question is not whether you can
+ * see anything but whether there is anything left to resolve.
  *
  * Two numbers because they are two different situations. ABOVE the ground, once the surface is more than a screen
  * or so away the picture is empty air and there is nothing left to resolve: the camera would keep descending
@@ -62,7 +68,7 @@ const RIM_ENTRY_REACH = 1;
  * ended with a blank screen: the disc stops drawing at PLANET_MAX_DIAGONALS and every region is a rim away, off
  * the edge of the window in every direction.
  */
-const REACH_ABOVE = 1.6;
+const REACH_ABOVE = 0.55;
 const REACH_BELOW = 2.5;
 
 /** Shortest signed way round the circle. */
@@ -300,6 +306,7 @@ function clampToGround(cam: Camera, view: View): void {
   const gap = Math.abs(above);
   if (!(gap > 1e-9)) return;
   const diagonal = Math.hypot(view.w, view.h);
+  const reach = above > 0 ? REACH_ABOVE * view.h : REACH_BELOW * diagonal;
   /**
    * NO VIEW, NO LIMIT.
    *
@@ -311,9 +318,8 @@ function clampToGround(cam: Camera, view: View): void {
    * reloads into a deep state.
    */
   if (!(diagonal > 0)) return;
-  const allowed = (above > 0 ? REACH_ABOVE : REACH_BELOW) * diagonal;
   // pxPerNodeUnit is 2^(z + logSpan), so the cap on it is a cap on z directly.
-  const maxZ = Math.log2(allowed / gap) - cam.node.logSpan;
+  const maxZ = Math.log2(reach / gap) - cam.node.logSpan;
   if (Number.isFinite(maxZ) && cam.z > maxZ) cam.z = maxZ;
 }
 

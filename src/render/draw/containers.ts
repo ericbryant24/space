@@ -310,10 +310,14 @@ function paintSwarm(
  * almost entirely empty. Draw the star, not the extent -- and draw it in its spectral colour, which is
  * the cue that carries the star's identity all the way down to the shading of a single wall.
  */
+export function starCoreRadius(id: number, systemRadiusPx: number): number {
+  return Math.max(0.8, systemRadiusPx * 0.055 * starLightOf(id).cls.discScale);
+}
+
 export function drawStar(ctx: CanvasRenderingContext2D, cx: number, cy: number, systemRadiusPx: number, id: number): void {
   const light = starLightOf(id);
   const ci = spectralIndexOf(id);
-  const r = Math.max(0.8, systemRadiusPx * 0.055 * light.cls.discScale);
+  const r = starCoreRadius(id, systemRadiusPx);
 
   // The second and last sanctioned gradient in the project: a star's bloom. It is BAKED rather than
   // built per call -- a fresh radial gradient is a canvas object each frame, and the same twelve blooms
@@ -445,7 +449,20 @@ export function systemStarRadius(id: number, truePx: number, parentPx: number): 
   // Brighter classes read larger, which is how a star chart shows magnitude.
   const rel = SPECTRAL[spectralIndexOf(id)]!.rel;
   const symbol = lastParentBase * (0.55 + 0.9 * rel);
-  return Math.max(Math.min(symbolCap(rel), Math.max(SYMBOL_MIN, symbol)), truePx);
+  /**
+   * THE FLOOR IS THE STAR, NOT THE SYSTEM.
+   *
+   * This used to bottom out at the SYSTEM's own radius on screen, and a system is ten astronomical units of
+   * almost entirely empty space -- so a few doublings inside a galaxy every catalogued star swelled into a
+   * white disc the size of its whole system, until the camera entered one and it collapsed to a dot with two
+   * orbit rings round it. The pop detector called it the largest single-frame change in the descent, and it
+   * was: a four-hundred-pixel sun turning into a twenty-pixel one.
+   *
+   * `starCoreRadius` is the expression `drawStar` uses for the real thing, so the chart symbol and the star it
+   * stands for are the same size at the moment one hands over to the other, and neither ever draws the empty
+   * space around it.
+   */
+  return Math.max(Math.min(symbolCap(rel), Math.max(SYMBOL_MIN, symbol)), starCoreRadius(id, truePx));
 }
 
 // --- Batched stars ------------------------------------------------------------------------------

@@ -36,7 +36,7 @@ import { beginStructureFrame } from './draw/structures.ts';
 import { computeSky, paintSky, type Sky } from './draw/sky.ts';
 import { metallicityAt, metallicityOf } from '../cosmic/metallicity.ts';
 import { groundHeightAt } from '../universe/node.ts';
-import { groundAt } from '../culture/terrain.ts';
+import { RELIEF, groundAt } from '../culture/terrain.ts';
 import { simTime } from '../core/clock.ts';
 import type { PlanetTraits } from '../universe/gen/planet.ts';
 import { buildingName, planetCultureFor, regionName, settlementName } from '../universe/gen/culture.ts';
@@ -472,8 +472,16 @@ function paint(
    * That was a real bug and a subtle one: the camera sits a little above the nominal radius when it is on high
    * ground, which can put the disc just off the bottom of the screen, and culling the parent culled the ground
    * with it. The screen went to bare sky, at one particular height, on one particular world.
+   *
+   * A DIAGONAL OF SLACK IS NOT ENOUGH, which is the second half of the same bug and took a pop detector to find.
+   * The excess is not a fixed number of pixels: standing on ground a fiftieth of a radius above the nominal one
+   * puts the planet's centre a fiftieth of a radius further away than its own `rPx`, and a fiftieth of a radius
+   * is twenty thousand pixels once the planet is a thousand screens across. So a stretch of the descent -- deep
+   * enough that the planet is enormous, shallow enough that the climb still reaches it -- came out as bare sky
+   * again, and the ground snapped back the moment the climb stopped one level short. RELIEF is the exact bound
+   * on how far the ground can stand out from the nominal radius, so it is the exact slack this needs.
    */
-  const reach = level.placement === 'rim' ? rPx + frame.diagonal : rPx;
+  const reach = level.placement === 'rim' ? rPx * (1 + RELIEF) + frame.diagonal : rPx;
   if (sx + reach < 0 || sy + reach < 0 || sx - reach > view.w || sy - reach > view.h) return;
 
   // A planet holds on to its own surface far longer than anything else, because its regions do not appear
