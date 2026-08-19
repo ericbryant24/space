@@ -151,6 +151,14 @@ const main = async () => {
 
   await page.goto(BASE, { waitUntil: 'load' });
   await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 20000 });
+  /**
+   * Start at the TOP of the ladder, not where the app opens.
+   *
+   * The app opens one rung in, on a cluster -- see `openingState` in main.ts -- because the whole field is
+   * thirty faint dots and a poor front door. A harness that walks the ladder wants the ladder's top, and Home
+   * is what goes there.
+   */
+  await page.keyboard.press('Home');
   await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
   await page.evaluate(() =>
     (window as unknown as { __recordAllHits(on: boolean): void }).__recordAllHits(true),

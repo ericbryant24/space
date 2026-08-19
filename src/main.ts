@@ -123,7 +123,6 @@ function thumbnail(): string {
   return tile.toDataURL('image/jpeg', 0.72);
 }
 
-applyState(initial);
 
 function applyState(state: Partial<CameraState>): void {
   // A pasted URL is untrusted: an unreachable path resolves to null, and we land at the nearest
@@ -148,6 +147,31 @@ function applyState(state: Partial<CameraState>): void {
   // After the focus has settled, not before: a pasted z can be outside the reachable range, and the spring
   // must be aimed at where the camera actually ended up rather than at what the URL asked for.
   input.cancelZoom();
+}
+
+/**
+ * WHERE THE APP OPENS.
+ *
+ * One rung in, on a cluster, and not at the root. The root is the whole field: its children are clusters, which
+ * at the size the whole field fits on a screen are eight pixels each, so the first thing anyone saw was thirty
+ * faint dots on an empty ground -- the emptiest picture the project can produce, offered as its front door. A
+ * cluster holds a hundred-odd galaxies and fills the screen with them, which is the view the whole thing was
+ * designed around: "from many galaxies on screen at once, down to a single building".
+ *
+ * Nothing is hidden by this. Zooming out from a cluster reaches the field in a few notches, exactly as it always
+ * did, and the field is still the top of the ladder. This only decides which end of the descent you start at.
+ *
+ * Deterministic: the cluster nearest the middle of the field, and the z that puts it at the centre of the
+ * precision window. So the opening view is the same on every visit and in every window, which is what makes it
+ * a place rather than an accident.
+ */
+function openingState(): Partial<CameraState> {
+  const ref = childNear(tree.root, 0, 0, 8);
+  if (!ref) return { path: [], k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z: ROOT_Z };
+  // Sized so the cluster fills most of the shorter side of whatever window it opens in, and clamped well inside
+  // the precision band either way so a very large or very small screen cannot start the camera mid-rebase.
+  const radius = Math.max(96, Math.min(1000, 0.42 * Math.min(view.w, view.h)));
+  return { path: [ref.cell], k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z: Math.log2(radius) - LEVELS.cluster.logSpan };
 }
 
 function resize(): void {
@@ -587,6 +611,8 @@ window.addEventListener('keydown', (e) => {
       break;
     case 'Home':
       cancelFlight();
+      // The TOP of the ladder, which is not where the app opens -- see `openingState`. Opening one rung in is
+      // about the first impression; Home is about getting all the way out, and there is no other key for that.
       applyState({ path: [], k: 0, cx: 0, cy: 0, fx: 0, fy: 0, z: ROOT_Z });
       router.push(stateOf(cam, seed));
       break;
@@ -640,6 +666,13 @@ reduceMotion?.addEventListener?.('change', (e) => {
 
 window.addEventListener('resize', resize);
 resize();
+/**
+ * AFTER the canvas has been measured, not before.
+ *
+ * Placing the camera needs the viewport: the opening view is sized from it, and `updateFocus` clamps against it.
+ * Run before the first resize, everything downstream saw a viewport of zero by zero.
+ */
+applyState(initial.path ? initial : openingState());
 updateFocus(cam, tree, view);
 
 /**

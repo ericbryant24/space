@@ -72,6 +72,18 @@ export function drawContainer(
   // A container is a place as well as a population, so a floor of presence survives even when every one
   // of its galaxies is drawn individually. Without it a cluster loses its extent the moment it resolves.
   const washK = census ? censusStrength(census) * (1 - 0.62 * resolved) : 1;
+  /**
+   * THE SAME LIGHT IN LESS AREA.
+   *
+   * A container too small for its contents to be picked out is all of them at once, and all of them at once
+   * is brighter than any one of them: the light is the same and the area it arrives in is smaller. Without
+   * this the opening view of the whole field -- which is nothing but clusters at eight pixels each -- was
+   * thirty faint smudges on a dark ground, the emptiest picture in the project and the first one anybody sees.
+   *
+   * It rises exactly over the range where the swarm has not yet started, so it is spent by the time the
+   * individual galaxies begin to arrive and the wash begins to give itself up to them.
+   */
+  const compact = census ? 1 + 1.2 * (1 - smoothstep(CLUSTER_SWARM_FADE_PX[0], CLUSTER_SWARM_FADE_PX[1], r)) : 1;
   const k = strength * appear * washK;
 
   if (k > 1 / 512) {
@@ -80,7 +92,7 @@ export function drawContainer(
       // Midpoints of the steps, so the outermost disc sits just inside the rim -- a step exactly at the
       // rim would carry zero alpha and be wasted, and one exactly at the centre would have no radius.
       const f = (WASH_STEPS - i - 0.5) / WASH_STEPS;
-      const target = washProfile(f) * k;
+      const target = Math.min(0.95, washProfile(f) * k * compact);
       // Discs composite, so each step only has to add what the one outside it did not.
       const add = covered >= 1 ? 0 : (target - covered) / (1 - covered);
       if (add > 1 / 512) {
