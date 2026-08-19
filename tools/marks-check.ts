@@ -42,6 +42,19 @@ const fail = (msg: string): never => {
   process.exit(1);
 };
 
+/** Everything on the page a reader could read: the chrome's own text, the tab's, and any hover tooltip. */
+const readable = (page: Page): Promise<string> =>
+  page.evaluate(() => {
+    const parts: string[] = [];
+    const overlay = document.getElementById('overlay');
+    if (overlay) parts.push(overlay.innerText ?? '');
+    parts.push(document.title ?? '');
+    for (const el of Array.from(document.querySelectorAll('[title], [alt], [placeholder]'))) {
+      parts.push(el.getAttribute('title') ?? '', el.getAttribute('alt') ?? '', el.getAttribute('placeholder') ?? '');
+    }
+    return parts.join(' ').trim();
+  });
+
 const main = async () => {
   const browser = await chromium.launch({ executablePath: chromiumPath() });
   const page = await browser.newPage({ viewport: { width: 1100, height: 700 } });
@@ -52,9 +65,17 @@ const main = async () => {
   await page.waitForFunction('window.__diveStep !== undefined', null, { timeout: 20000 });
   await page.evaluate(() => (window as unknown as { __freezeTime(s: number): void }).__freezeTime(0));
 
-  // NOTHING TO READ. The default view must not put a single word on screen.
-  const words = await page.evaluate(() => (document.getElementById('overlay')?.innerText ?? '').trim());
-  if (words.length > 0) fail(`the default view shows text: ${JSON.stringify(words.slice(0, 120))}`);
+  /**
+   * NOTHING TO READ, ANYWHERE.
+   *
+   * Not in the chrome, not in the tab, and not waiting under the pointer. A `title` attribute is a caption that
+   * happens to be on a timer -- the browser draws it a second after you rest on something -- and a document
+   * title is the same claim in a different frame: it names the thing before you have looked at it, which is
+   * exactly what the drawing is supposed to do instead. `aria-label` is exempt and has to be: it is never
+   * painted, and without it none of this is reachable with a screen reader at all.
+   */
+  const words = await readable(page);
+  if (words.length > 0) fail(`the default view shows text: ${JSON.stringify(words.slice(0, 160))}`);
 
   // Somewhere worth keeping.
   for (let i = 0; i < 400; i++) {
@@ -105,6 +126,10 @@ const main = async () => {
   await settle(page);
   tiles = await page.locator('.rail .mark').count();
   if (tiles !== 1) fail(`forgetting a tile left ${tiles - 1} behind`);
+
+  // And again with a tile in the rail, because that is the one thing on screen the app puts there itself.
+  const after = await readable(page);
+  if (after.length > 0) fail(`a kept view shows text: ${JSON.stringify(after.slice(0, 160))}`);
 
   await browser.close();
   if (errors.length) {
