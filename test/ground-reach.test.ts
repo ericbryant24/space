@@ -139,3 +139,28 @@ test('the clamp does not touch anything above a planet', () => {
   updateFocus(cam, tree, VIEW);
   assert.ok(['field', 'cluster', 'galaxy', 'system', 'planet'].includes(cam.node.kind));
 });
+
+/**
+ * A camera restored from a permalink is placed before the canvas has been measured.
+ *
+ * So the first call arrives with a viewport of zero by zero, and a limit of zero screens is a limit of minus
+ * infinity on z -- which is not a clamp, it is a wrecked camera. Everything downstream went to NaN, the focus
+ * walked up the ladder on its own, and the renderer spent nine seconds a frame on it: opening a deep link took
+ * thirty-six seconds.
+ */
+test('a viewport with no size cannot move the camera', () => {
+  const tree = new Tree(0x51ace);
+  const planet = aPlanet(tree);
+  for (const [w, h] of [
+    [0, 0],
+    [0, 900],
+    [1600, 0],
+  ] as const) {
+    const cam = cameraOn(planet, 0, 0, -15);
+    const z = cam.z;
+    updateFocus(cam, tree, { w, h });
+    assert.ok(Number.isFinite(cam.z), `z went to ${cam.z} at ${w}x${h}`);
+    assert.ok(Number.isFinite(cam.fx) && Number.isFinite(cam.fy), 'and the offset stayed finite');
+    assert.equal(cam.z, z, 'nothing may be clamped against a viewport that has not been measured');
+  }
+});

@@ -298,12 +298,23 @@ function clampToGround(cam: Camera, view: View): void {
   }
 
   const gap = Math.abs(above);
-  if (gap < 1e-9) return;
+  if (!(gap > 1e-9)) return;
   const diagonal = Math.hypot(view.w, view.h);
+  /**
+   * NO VIEW, NO LIMIT.
+   *
+   * A camera restored from a permalink is placed before the canvas has been measured, so the first call here
+   * arrives with a viewport of zero by zero -- and a limit of zero screens is a limit of minus infinity on z,
+   * which is not a clamp, it is a wrecked camera. Everything downstream then went to NaN, the focus walked up
+   * the ladder on its own, and the renderer spent nine seconds a frame chewing on it: a deep link took
+   * thirty-six seconds to open. `tools/marks-check.ts` is what caught it, by being the only harness that
+   * reloads into a deep state.
+   */
+  if (!(diagonal > 0)) return;
   const allowed = (above > 0 ? REACH_ABOVE : REACH_BELOW) * diagonal;
   // pxPerNodeUnit is 2^(z + logSpan), so the cap on it is a cap on z directly.
   const maxZ = Math.log2(allowed / gap) - cam.node.logSpan;
-  if (cam.z > maxZ) cam.z = maxZ;
+  if (Number.isFinite(maxZ) && cam.z > maxZ) cam.z = maxZ;
 }
 
 /** Absolute position in ROOT node units. Test-only: the ground truth a round trip is measured against. */
