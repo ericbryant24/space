@@ -1,0 +1,259 @@
+<title>Three Lenses on a Rim</title>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Spectral:ital,wght@0,400;0,600;1,400&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap">
+<style>
+  /* One committed visual world: these plates paint their own void, and a light ground would break
+     every one of them. So the palette is declared outright rather than switched. */
+  :root {
+    --void: #0c0e17;
+    --plate: #141827;
+    --plate-lift: #191e30;
+    --rule: #242a3e;
+    --ink: #e9ecf6;
+    --dim: #9aa4c2;
+    --dimmer: #6b7593;
+    --brass: #d8a24e;
+    --air: #7fb0d6;
+    --measure: 66ch;
+    color-scheme: dark;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    background: var(--void);
+    color: var(--ink);
+    font-family: 'IBM Plex Sans', ui-sans-serif, system-ui, sans-serif;
+    font-size: 15px;
+    line-height: 1.6;
+    -webkit-font-smoothing: antialiased;
+  }
+  .wrap { max-width: 1140px; margin: 0 auto; padding: 0 28px 96px; }
+
+  /* --- masthead --- */
+  header { padding: 64px 0 30px; }
+  .eyebrow {
+    font-family: 'IBM Plex Mono', ui-monospace, monospace;
+    font-size: 11px; letter-spacing: 0.22em; text-transform: uppercase;
+    color: var(--brass); margin: 0 0 18px;
+  }
+  h1 {
+    font-family: Spectral, Georgia, 'Times New Roman', serif;
+    font-weight: 600; font-size: clamp(34px, 5.2vw, 54px); line-height: 1.06;
+    letter-spacing: -0.015em; margin: 0 0 20px; text-wrap: balance;
+  }
+  .standfirst {
+    font-family: Spectral, Georgia, serif; font-size: 19px; line-height: 1.62;
+    color: var(--dim); max-width: var(--measure); margin: 0 0 26px;
+  }
+  .standfirst em { color: var(--ink); font-style: italic; }
+  .brief {
+    border-left: 2px solid var(--brass); padding: 4px 0 4px 18px;
+    max-width: var(--measure); margin: 0 0 34px;
+    font-family: Spectral, Georgia, serif; font-style: italic; font-size: 16.5px; color: var(--dim);
+  }
+  .controls {
+    display: flex; flex-wrap: wrap; gap: 20px; align-items: center;
+    border-top: 1px solid var(--rule); border-bottom: 1px solid var(--rule);
+    padding: 13px 0; font-family: 'IBM Plex Mono', monospace; font-size: 11.5px;
+    letter-spacing: 0.06em; color: var(--dimmer);
+  }
+  .controls label { display: inline-flex; gap: 8px; align-items: center; color: var(--dim); }
+  select {
+    background: var(--plate-lift); color: var(--ink); border: 1px solid var(--rule);
+    border-radius: 4px; padding: 3px 7px; font: inherit; font-size: 11.5px;
+  }
+  select:focus-visible, input:focus-visible { outline: 2px solid var(--brass); outline-offset: 2px; }
+
+  /* --- plates --- */
+  main { display: flex; flex-direction: column; gap: 30px; padding-top: 38px; }
+  .plate {
+    display: grid; grid-template-columns: minmax(0, 1fr) 318px;
+    background: var(--plate); border: 1px solid var(--rule); border-radius: 3px;
+  }
+  .stage { position: relative; aspect-ratio: 1 / 1; }
+  .stage canvas {
+    position: absolute; inset: 0; width: 100%; height: 100%; display: block;
+    cursor: ew-resize; touch-action: none;
+  }
+  .caption {
+    border-left: 1px solid var(--rule); padding: 26px 26px 22px;
+    display: flex; flex-direction: column; gap: 14px;
+  }
+  .operation {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.2em;
+    text-transform: uppercase; color: var(--brass);
+  }
+  .caption h2 {
+    font-family: Spectral, Georgia, serif; font-weight: 600; font-size: 25px; line-height: 1.14;
+    margin: -4px 0 0; letter-spacing: -0.01em;
+  }
+  .caption p { margin: 0; color: var(--dim); font-size: 14px; line-height: 1.62; }
+  .caption p strong { color: var(--ink); font-weight: 600; }
+  .note {
+    font-family: Spectral, Georgia, serif; font-style: italic; font-size: 14.5px; line-height: 1.55;
+    color: var(--dim); border-top: 1px solid var(--rule); padding-top: 14px;
+  }
+  .note strong { font-style: normal; font-weight: 600; color: var(--air); }
+  .knobs { display: grid; gap: 9px; margin-top: auto; padding-top: 16px; }
+  .knob {
+    display: grid; grid-template-columns: 96px 1fr; align-items: center; gap: 12px;
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; letter-spacing: 0.06em;
+    color: var(--dimmer);
+  }
+  input[type=range] { width: 100%; accent-color: var(--brass); }
+  .readout {
+    font-family: 'IBM Plex Mono', monospace; font-size: 10.5px; line-height: 1.75;
+    color: var(--dimmer); border-top: 1px solid var(--rule); padding-top: 12px;
+    font-variant-numeric: tabular-nums;
+  }
+  .readout b { color: var(--air); font-weight: 500; }
+
+  /* --- closing --- */
+  .verdict { padding-top: 46px; max-width: var(--measure); }
+  .verdict h3 {
+    font-family: Spectral, Georgia, serif; font-size: 24px; font-weight: 600; margin: 0 0 16px;
+  }
+  .verdict p { color: var(--dim); margin: 0 0 14px; }
+  .verdict strong { color: var(--ink); font-weight: 600; }
+  dl { margin: 22px 0 0; display: grid; gap: 14px; }
+  dt {
+    font-family: 'IBM Plex Mono', monospace; font-size: 11px; letter-spacing: 0.14em;
+    text-transform: uppercase; color: var(--brass); margin-bottom: 3px;
+  }
+  dd { margin: 0; color: var(--dim); font-size: 14.5px; }
+
+  @media (max-width: 880px) {
+    .plate { grid-template-columns: 1fr; }
+    .caption { border-left: 0; border-top: 1px solid var(--rule); }
+  }
+  @media (prefers-reduced-motion: reduce) { * { animation: none !important; transition: none !important; } }
+</style>
+
+<div class="wrap">
+<header>
+  <p class="eyebrow">The Almanac · planet scale · prototypes</p>
+  <h1>Three lenses on a rim</h1>
+  <p class="standfirst">A planet drawn as a cross-section: one circle, and <em>everything that
+     matters happens on its edge</em>. Terrain, ice, forest, coastline and cities all live in the
+     few pixels either side of the ground line, and the interior is deliberately shadow.</p>
+  <p class="brief">“2D circles, things happen in the edge. Scale should be skewed so that I can see
+     the whole planet and also see surface details.”</p>
+  <p class="standfirst" style="font-size:16px">Same world, same paint, same drawing pass in all three
+     plates. The only thing that changes is the lens — how a point's longitude and altitude become a
+     place on the screen. <strong style="color:var(--ink);font-weight:600">Drag any plate</strong> to
+     travel round the rim; all three stay locked to the same spot.</p>
+  <div class="controls">
+    <label>world <select id="seed"></select></label>
+    <label><input type="checkbox" id="spin"> drift</label>
+    <span>drag to travel · scroll to work the lens</span>
+  </div>
+</header>
+
+<main>
+  <section class="plate" data-lens="rim">
+    <div class="stage"><canvas></canvas></div>
+    <div class="caption">
+      <div class="operation">Exaggerate the altitude</div>
+      <h2>Rim</h2>
+      <p>One true circle. Longitude is honest all the way round; <strong>altitude is not</strong>.
+         The forty metres above sea level get as much screen as the five hundred kilometres below it,
+         so mountains, ice, forest and coastline all read at a glance with the whole planet in frame.</p>
+      <p>A town narrower than three pixels is drawn as a <strong>mark</strong> rather than as
+         geometry. A world has to look inhabited from orbit.</p>
+      <p class="note">Take <strong>relief</strong> to zero to see what the skew buys: at true scale the
+         planet is a plain circle with a hairline of sky. Take <strong>zoom</strong> up to see the cost
+         of having no lens at all — detail only arrives once the planet has left the frame.</p>
+      <div class="knobs">
+        <div class="knob"><span>relief</span><input type="range" data-knob="relief" min="0" max="1" step="0.01" value="1" aria-label="relief"></div>
+        <div class="knob"><span>zoom</span><input type="range" data-knob="zoom" min="1" max="60" step="0.1" value="1" aria-label="zoom"></div>
+      </div>
+      <div class="readout"></div>
+    </div>
+  </section>
+
+  <section class="plate" data-lens="fisheye">
+    <div class="stage"><canvas></canvas></div>
+    <div class="caption">
+      <div class="operation">Redistribute the longitude</div>
+      <h2>Fisheye</h2>
+      <p>The disc never changes size and never leaves the screen. A window of ground around the focus
+         is spread across a fixed arc, and the <strong>entire rest of the planet</strong> is compressed
+         logarithmically into what is left — so every decade of distance from where you are looking
+         costs the same slice of screen.</p>
+      <p>The falloff is <strong>solved, not tuned</strong>: it is the one value that makes the angular
+         scale continuous across the edge of the window. Guess, and every coastline crossing that edge
+         has a visible kink in it.</p>
+      <p class="note">This is the plate that answers the brief literally — a street and the far side of
+         the world in one unbroken circle. Its limit is curvature: the focus window may only hold a
+         <strong>shallow arc</strong>, because a street bent through 110° splays its buildings out like
+         the teeth of a crown.</p>
+      <div class="knobs">
+        <div class="knob"><span>zoom</span><input type="range" data-knob="zoom" min="0" max="5.6" step="0.02" value="4.4" aria-label="zoom in decades"></div>
+        <div class="knob"><span>relief</span><input type="range" data-knob="relief" min="0" max="1" step="0.01" value="1" aria-label="relief"></div>
+      </div>
+      <div class="readout"></div>
+    </div>
+  </section>
+
+  <section class="plate" data-lens="ladder">
+    <div class="stage"><canvas></canvas></div>
+    <div class="caption">
+      <div class="operation">Repeat the circle</div>
+      <h2>Ladder</h2>
+      <p>The planet stays a small undistorted disc. Each ring outside it is <strong>one slice of the
+         ring within</strong>, unrolled and magnified by the same factor — so the marked wedge is always
+         one part in <em>step</em> of whatever it sits on, and the plumb line says all four are looking
+         at the same place.</p>
+      <p>Ground sits on each ring's <strong>inner</strong> edge with the sky filling outward, so up is
+         outward everywhere, the planet included. Each rung carries its own magnification and span.</p>
+      <p class="note">Every scale on screen at once, and nothing distorted anywhere — but each rung is a
+         thin band, and you <strong>read</strong> it rather than fly through it. This is the instrument,
+         not the window.</p>
+      <div class="knobs">
+        <div class="knob"><span>step per rung</span><input type="range" data-knob="zoom" min="6" max="44" step="0.5" value="14" aria-label="step per rung"></div>
+        <div class="knob"><span>relief</span><input type="range" data-knob="relief" min="0" max="1" step="0.01" value="1" aria-label="relief"></div>
+      </div>
+      <div class="readout"></div>
+    </div>
+  </section>
+</main>
+
+<div class="verdict">
+  <h3>What the three of them settle</h3>
+  <p>Three things came out of building them that were not obvious from the sketch, and all three are
+     about where the skew is allowed to act.</p>
+  <dl>
+    <dt>Heights measure from their own ground</dt>
+    <dd>Feeding absolute altitude through a locally true scale put a town sitting at 400 m elevation
+        180 px outside the disc, its buildings floating in a sky above the coastline they belonged to.
+        Terrain keeps the art-directed ramp — that is the skew, and it is what makes a mountain legible
+        from orbit — while an object's own height takes whichever is larger, the ramp or a locally true
+        scale.</dd>
+    <dt>Magnification is a ground-level effect</dt>
+    <dd>Applied at every altitude, it ran away with the sky: the 130 km shell got pushed out past 1.5×
+        the disc wherever the lens magnified, so the atmosphere came out as a lobe instead of a circle.
+        Full strength under 600 m, gone by 6 km.</dd>
+    <dt>The interior is shadow</dt>
+    <dd>Concentric bands of rock were the whole problem with the old planet: the eye went to the middle,
+        where nothing happens, and the rim — where everything happens — was a hairline. The body is now
+        one value barely above the void, the caption in the middle says what the world is, and the rim
+        is the only lit thing in the picture.</dd>
+  </dl>
+  <p style="margin-top:26px"><strong>Where I would take it:</strong> Rim is the planet rung, and it is
+     finished enough to build against. Fisheye is the answer for the descent — it is the only one of the
+     three with no cut in it — provided the focus window stays a shallow arc. Ladder is a fine
+     instrument and a poor vehicle; its idea worth keeping is the labelled rung, not the rings.</p>
+</div>
+</div>
+
+<script type="module">
+__BUNDLE__
+
+  const sel = document.getElementById('seed');
+  for (const s of [11, 7, 23, 31, 44, 58, 63]) {
+    const o = document.createElement('option'); o.value = s; o.textContent = 'no. ' + s; sel.append(o);
+  }
+  sel.value = String(getState().seed);
+  sel.addEventListener('change', () => setSeed(+sel.value));
+  document.getElementById('spin').addEventListener('change', (e) => setSpin(e.target.checked));
+  document.querySelectorAll('.plate').forEach(mount);
+</script>

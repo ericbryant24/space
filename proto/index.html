@@ -1,0 +1,130 @@
+<!doctype html>
+<meta charset="utf-8">
+<title>Planet scale — prototypes</title>
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<style>
+  :root {
+    --bg: #0d0f1a; --panel: #161a2a; --line: #262c42;
+    --ink: #e7ebf5; --dim: #98a2c0; --dimmer: #6b7594; --accent: #d8b06a;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; background: var(--bg); color: var(--ink);
+         font: 15px/1.55 ui-sans-serif, system-ui, -apple-system, sans-serif; }
+  header { padding: 34px 32px 10px; max-width: 1180px; margin: 0 auto; }
+  h1 { font-size: 26px; margin: 0 0 8px; letter-spacing: -0.01em; }
+  header p { color: var(--dim); margin: 0 0 14px; max-width: 66ch; }
+  .globals { display: flex; gap: 18px; align-items: center; flex-wrap: wrap;
+             padding: 10px 14px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; }
+  .globals label { color: var(--dim); font-size: 13px; }
+  main { max-width: 1180px; margin: 0 auto; padding: 18px 32px 80px; display: grid; gap: 26px; }
+  section { background: var(--panel); border: 1px solid var(--line); border-radius: 14px; overflow: hidden;
+            display: grid; grid-template-columns: minmax(0,1fr) 330px; }
+  .stage { position: relative; aspect-ratio: 1 / 1; min-height: 380px; }
+  canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; cursor: ew-resize;
+           touch-action: none; }
+  .side { padding: 20px 22px; border-left: 1px solid var(--line); display: flex; flex-direction: column; gap: 12px; }
+  .tag { font-size: 11px; letter-spacing: 0.14em; text-transform: uppercase; color: var(--accent); }
+  h2 { font-size: 19px; margin: 2px 0 0; }
+  .side p { margin: 0; color: var(--dim); font-size: 13.5px; }
+  .side p b { color: var(--ink); font-weight: 600; }
+  .knobs { display: grid; gap: 10px; margin-top: auto; }
+  .knob { display: grid; grid-template-columns: 86px 1fr; align-items: center; gap: 10px; font-size: 12px; color: var(--dimmer); }
+  input[type=range] { width: 100%; accent-color: var(--accent); }
+  .readout { font-size: 11.5px; color: var(--dimmer); border-top: 1px solid var(--line); padding-top: 10px; }
+  .readout b { color: var(--dim); font-weight: 600; }
+  .verdict { font-size: 12.5px; color: var(--dim); background: #12162473; border: 1px solid var(--line);
+             border-radius: 8px; padding: 9px 11px; }
+  @media (max-width: 900px) { section { grid-template-columns: 1fr; } .side { border-left: 0; border-top: 1px solid var(--line); } }
+</style>
+
+<header>
+  <h1>Planet scale — three lenses on one world</h1>
+  <p>Same world, same paint, same drawing pass. The only thing that changes between the three is the
+     lens: how a point's longitude and altitude become a place on the screen. Drag any panel to travel
+     round the rim — all three stay locked to the same spot.</p>
+  <div class="globals">
+    <label>world <select id="seed"></select></label>
+    <label><input type="checkbox" id="spin"> drift</label>
+    <span style="color:var(--dimmer);font-size:12.5px">drag to travel · scroll to work the lens</span>
+  </div>
+</header>
+
+<main>
+  <section data-lens="rim">
+    <div class="stage"><canvas></canvas></div>
+    <div class="side">
+      <div class="tag">Prototype 1</div>
+      <h2>Rim — exaggerate the altitude</h2>
+      <p>One true circle. Longitude is honest all the way round; <b>altitude is not</b>. The forty
+         metres above sea level get as much screen as the five hundred kilometres below it, so
+         mountains, forests, ice and coastline all read at a glance while the whole planet is in frame.</p>
+      <p>Towns below three pixels wide are drawn as <b>marks</b>, not geometry — a world has to look
+         inhabited from orbit.</p>
+      <div class="verdict">Turn <b>relief</b> to zero to see what the skew buys: a true-scale planet is
+         a plain circle with a hairline of sky. Turn <b>zoom</b> up to see the honest cost of having no
+         lens at all — detail only arrives once the planet has left the frame.</div>
+      <div class="knobs">
+        <div class="knob"><span>relief</span><input type="range" data-knob="relief" min="0" max="1" step="0.01" value="1"></div>
+        <div class="knob"><span>zoom</span><input type="range" data-knob="zoom" min="1" max="60" step="0.1" value="1"></div>
+      </div>
+      <div class="readout"></div>
+    </div>
+  </section>
+
+  <section data-lens="fisheye">
+    <div class="stage"><canvas></canvas></div>
+    <div class="side">
+      <div class="tag">Prototype 2</div>
+      <h2>Fisheye — redistribute the longitude</h2>
+      <p>The disc never changes size and never leaves the screen. A window of ground around the focus
+         is spread across a fixed arc of about 110°, and the <b>entire rest of the planet</b> is
+         compressed logarithmically into what is left — so every decade of distance from where you are
+         looking costs the same slice of screen.</p>
+      <p>The falloff is <b>solved, not tuned</b>: it is the value that makes the angular scale
+         continuous across the edge of the window. Guess and there is a visible kink in every coastline
+         crossing it.</p>
+      <div class="verdict">This is the one that answers the brief literally: at full zoom the dashed
+         window holds a few hundred metres of street, the far side of the world is still on screen, and
+         it is one continuous circle with no cut in it.</div>
+      <div class="knobs">
+        <div class="knob"><span>zoom</span><input type="range" data-knob="zoom" min="0" max="5.6" step="0.02" value="4.4"></div>
+        <div class="knob"><span>relief</span><input type="range" data-knob="relief" min="0" max="1" step="0.01" value="1"></div>
+      </div>
+      <div class="readout"></div>
+    </div>
+  </section>
+
+  <section data-lens="ladder">
+    <div class="stage"><canvas></canvas></div>
+    <div class="side">
+      <div class="tag">Prototype 3</div>
+      <h2>Ladder — repeat the circle</h2>
+      <p>The planet stays a small undistorted disc. Each ring outside it is <b>one slice of the ring
+         within, unrolled</b> and magnified by the same factor — so the marked wedge is always one part
+         in <i>step</i> of whatever it sits on, and the plumb line says all four are looking at the
+         same place.</p>
+      <p>Ground sits on each ring's <b>inner</b> edge with the sky filling outward, so up is outward
+         everywhere, planet included.</p>
+      <div class="verdict">Every scale is on screen at once and nothing is distorted — but each rung
+         is a thin band, and you read it rather than fly through it. This is the instrument, not the
+         window.</div>
+      <div class="knobs">
+        <div class="knob"><span>step per rung</span><input type="range" data-knob="zoom" min="6" max="44" step="0.5" value="14"></div>
+        <div class="knob"><span>relief</span><input type="range" data-knob="relief" min="0" max="1" step="0.01" value="1"></div>
+      </div>
+      <div class="readout"></div>
+    </div>
+  </section>
+</main>
+
+<script type="module">
+  import { mount, setSeed, setSpin, getState } from './planet/app.js';
+  const sel = document.getElementById('seed');
+  for (const s of [11, 7, 23, 31, 44, 58, 63]) {
+    const o = document.createElement('option'); o.value = s; o.textContent = 'no. ' + s; sel.append(o);
+  }
+  sel.value = String(getState().seed);
+  sel.addEventListener('change', () => setSeed(+sel.value));
+  document.getElementById('spin').addEventListener('change', (e) => setSpin(e.target.checked));
+  document.querySelectorAll('section').forEach(mount);
+</script>

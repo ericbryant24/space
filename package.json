@@ -17,7 +17,8 @@
     "relief": "node tools/relief.ts",
     "seams": "node tools/seam-check.ts",
     "marks": "node tools/marks-check.ts",
-    "pops": "node tools/pop-check.ts"
+    "pops": "node tools/pop-check.ts",
+    "proto": "node proto/bundle.mjs && node tools/proto-shots.mjs"
   },
   "devDependencies": {
     "@types/node": "^26.2.0",
