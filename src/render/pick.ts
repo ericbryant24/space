@@ -4,7 +4,14 @@ import { PLACEMENT_DETAIL, groundAt } from '../culture/terrain.ts';
 import { groundHeightAt, nearestRim, rimCellAt, rimChild, type ChildRef, type Node } from '../universe/node.ts';
 import { LEVELS } from '../universe/schema.ts';
 import type { Tree } from '../universe/tree.ts';
-import { ANCESTOR_LIMIT_DIAGONALS, HIT_GRAB_PX, hitTest, scatterHitAt, type HitEntry } from './renderer.ts';
+import {
+  ANCESTOR_LIMIT_DIAGONALS,
+  HIT_GRAB_PX,
+  MAX_SELF_DRAW_DIAGONALS,
+  hitTest,
+  scatterHitAt,
+  type HitEntry,
+} from './renderer.ts';
 
 /**
  * WHAT IS UNDER A SCREEN POINT, INDEPENDENTLY OF WHAT WAS DRAWN.
@@ -162,7 +169,17 @@ function climbRim(
     const sn = ref.spin === 0 ? 0 : Math.sin(ref.spin);
     const pax = (ax * c + ay * sn) / ref.rel;
     const pay = (ay * c - ax * sn) / ref.rel;
-    if (Math.hypot(pax, pay) * r > ANCESTOR_LIMIT_DIAGONALS * diagonal) return null;
+    /**
+     * The same rule the renderer's climb uses, and it has to be the same: this walk exists to answer for the nodes
+     * that walk paints. A rim parent is kept for as long as its children are smaller than the screen, because its
+     * children are the only thing painting the ground and their siblings are only reachable through it -- see
+     * `worthClimbing` in renderer.ts.
+     */
+    const rim = LEVELS[parent.kind].placement === 'rim';
+    const keep = rim
+      ? Math.hypot(ax, ay) * r < MAX_SELF_DRAW_DIAGONALS * diagonal
+      : Math.hypot(pax, pay) * r <= ANCESTOR_LIMIT_DIAGONALS * diagonal;
+    if (!keep) return null;
     cxF -= pax * ref.ox - pay * ref.oy;
     cyF -= pay * ref.ox + pax * ref.oy;
     ax = pax;

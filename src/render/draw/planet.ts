@@ -6,7 +6,7 @@ import { makeChild, orbitCount, orbitRadius, orbitalChild, type Node } from '../
 import { LEVELS } from '../../universe/schema.ts';
 import { outlineWidth, smoothstep } from '../bands.ts';
 import { PLATE_RIND, drawPlanetBody } from './ground.ts';
-import { beachDepth, classifySkin, materialTone, skinDepth } from './skin.ts';
+import { beachDepth, classifySkin, materialTone, rockTone, skinDepth } from './skin.ts';
 import { makeSurface } from '../sprites.ts';
 import { atLuminance, css, hueDelta, luminanceOf, shade, solveL, type Hsl } from '../color.ts';
 
@@ -125,6 +125,15 @@ function meanOf(parts: readonly (readonly [Hsl, number])[]): Hsl {
   return { h, s, l: solveL(h, s, lum / area) };
 }
 
+/**
+ * The enclosing galaxy's chemistry: what the bedrock, and therefore the sand, the sea bed and the cliffs, are
+ * made of. A planet sits in exactly one galaxy, so it is a fact about the planet and caching by id is safe.
+ */
+export interface Ore {
+  readonly hue: number;
+  readonly metallicity: number;
+}
+
 const meanCache = new Map<number, PlanetMean>();
 
 /**
@@ -135,10 +144,10 @@ const meanCache = new Map<number, PlanetMean>();
  * for a thousand frames. Time-independent as well -- a gas giant's bands drift, and averaging them at the
  * current phase would make the world's icon shimmer.
  */
-export function planetMeanColour(id: number, t: PlanetTraits): PlanetMean {
+export function planetMeanColour(id: number, t: PlanetTraits, ore: Ore): PlanetMean {
   const hit = meanCache.get(id);
   if (hit) return hit;
-  const mean = isGiant(t.cls) ? giantMean(id, t) : rockyMean(id, t);
+  const mean = isGiant(t.cls) ? giantMean(id, t) : rockyMean(id, t, ore);
   if (meanCache.size > 256) meanCache.clear();
   meanCache.set(id, mean);
   return mean;
@@ -170,7 +179,7 @@ const PLANET_METRES = 2 ** LEVELS.planet.logSpan;
  * not a shortcoming of the average -- it is what the world looks like, and the stamp agreeing with it is
  * the entire point.
  */
-function rockyMean(id: number, t: PlanetTraits): PlanetMean {
+function rockyMean(id: number, t: PlanetTraits, ore: Ore): PlanetMean {
   const s = surfaceColours(t);
   // Set to match what a region plate paints, exactly as in ground.ts: see PLATE_RIND.
   const crust = Math.min(1 - RELIEF * 0.7, 1 - PLATE_RIND);
@@ -223,11 +232,11 @@ function rockyMean(id: number, t: PlanetTraits): PlanetMean {
     const end = k === runs.length - 1 ? run.to : run.to - 1;
     let area = 0;
     for (let i = run.from; i <= end; i++) area += skinArea[i]!;
-    rind.push([materialTone(run.material, run.biome, s, t), area]);
+    rind.push([materialTone(run.material, run.biome, s, t, ore), area]);
   }
   // What is left of the rind, in the tones ground.ts fills it with: rock under the skin, then the
   // lightened shelf water and the deep water over the drowned part of it.
-  rind.push([atLuminance(s.land, Math.max(0.04, luminanceOf(s.land) * 0.62)), rock]);
+  rind.push([rockTone(s.land, ore), rock]);
   rind.push([atLuminance(s.sea, Math.min(0.72, luminanceOf(s.sea) + 0.16)), shelf]);
   rind.push([s.sea, deep]);
 
@@ -551,8 +560,16 @@ const STAMP_PX = Math.sqrt(PLANET_ICON_FADE_PX[0] * PLANET_ICON_FADE_PX[1]);
  * a rind. Nothing here is picked: both tones and the radius between them come from the same field and the
  * same construction the full-size drawing uses.
  */
-function paintPlanetStamp(ctx: CanvasRenderingContext2D, cx: number, cy: number, r: number, id: number, t: PlanetTraits): void {
-  const mean = planetMeanColour(id, t);
+function paintPlanetStamp(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  cy: number,
+  r: number,
+  id: number,
+  t: PlanetTraits,
+  ore: Ore,
+): void {
+  const mean = planetMeanColour(id, t, ore);
   ctx.fillStyle = css(mean.surface);
   ctx.beginPath();
   ctx.arc(cx, cy, r, 0, Math.PI * 2);
@@ -626,6 +643,7 @@ export function drawPlanetIcon(
   truePx: number,
   id: number,
   t: PlanetTraits,
+  ore: Ore,
 ): number {
   const r = Math.max(PLANET_ICON_MIN_PX, truePx);
   const stamp = 1 - smoothstep(PLANET_ICON_FADE_PX[0], PLANET_ICON_FADE_PX[1], r);
@@ -636,7 +654,7 @@ export function drawPlanetIcon(
     return r;
   }
   if (stamp >= 1 - 1 / 255) {
-    paintPlanetStamp(ctx, cx, cy, r, id, t);
+    paintPlanetStamp(ctx, cx, cy, r, id, t, ore);
     return r;
   }
 
@@ -650,7 +668,7 @@ export function drawPlanetIcon(
   const my = half + (cy - Math.floor(cy));
 
   fore.ctx.clearRect(0, 0, size, size);
-  paintPlanetStamp(fore.ctx, mx, my, r, id, t);
+  paintPlanetStamp(fore.ctx, mx, my, r, id, t, ore);
   back.ctx.clearRect(0, 0, size, size);
   drawPlanet(back.ctx, mx, my, r, id, t);
 
@@ -716,6 +734,7 @@ export function drawOrbitRings(
   rPx: number,
   node: Node,
   fallback: Hsl,
+  ore: Ore,
 ): void {
   const count = orbitCount(node);
   for (let i = 0; i < count; i++) {
@@ -723,7 +742,7 @@ export function drawOrbitRings(
     const traits = ref ? makeChild(node, ref).ground?.traits : null;
     const tone =
       ref && traits
-        ? atLuminance(planetMeanColour(ref.id, traits).disc, ORBIT_RING_LUMINANCE)
+        ? atLuminance(planetMeanColour(ref.id, traits, ore).disc, ORBIT_RING_LUMINANCE)
         : fallback;
     drawOrbitRing(ctx, cx, cy, orbitRadius(i, count) * rPx, tone);
   }

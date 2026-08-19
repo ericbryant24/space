@@ -190,19 +190,33 @@ export function classifySkin(
   return out;
 }
 
-/** What each material looks like on this world, before the time of day is applied. */
-export function materialTone(m: Material, biome: Biome, s: Surface, traits: PlanetTraits): Hsl {
+/**
+ * What each material looks like on this world, before the time of day is applied.
+ *
+ * Three of the five are made of the bedrock and take their value from it -- bare rock IS the bedrock, showing
+ * where the slope is too steep for anything to hold; sand is ground-up rock, so a world whose stone is dark has
+ * dark sand; and a sea bed is the same stone under water. Only soil belongs to the biome and only snow belongs
+ * to the sky. That is the whole of what an edge-on world is made of, in one place.
+ */
+export function materialTone(
+  m: Material,
+  biome: Biome,
+  s: Surface,
+  traits: PlanetTraits,
+  ore: { hue: number; metallicity: number },
+): Hsl {
+  const stone = rockTone(s.land, ore);
   switch (m) {
     case 'bed':
-      return atLuminance(s.land, Math.max(0.04, luminanceOf(s.land) * 0.66));
+      // Wet stone is dark stone, and it puts a clear step under the waterline.
+      return atLuminance(stone, Math.max(0.03, luminanceOf(stone) * 0.68));
     case 'snow':
       return { h: traits.atmHue, s: 0.07, l: solveL(traits.atmHue, 0.07, 0.9) };
     case 'rock':
-      return atLuminance({ ...s.land, s: s.land.s * 0.45 }, Math.max(0.06, luminanceOf(s.land) * 0.78));
+      return atLuminance(stone, Math.min(0.75, luminanceOf(stone) * 1.22 + 0.03));
     case 'sand':
-      // Sand is ground-up rock, so it takes the land's own value rather than a fixed beach yellow: on a world
-      // whose rock is dark the sand is dark too.
-      return atLuminance({ h: 44, s: 0.3, l: 0.7 }, Math.min(0.82, luminanceOf(s.land) + 0.26));
+      return atLuminance({ h: stone.h + hueDelta(stone.h, 44) * 0.6, s: Math.min(0.4, stone.s + 0.12), l: 0.7 },
+        Math.min(0.84, luminanceOf(stone) + 0.3));
     case 'soil':
       return biomeTone(biome, s, traits);
   }
@@ -325,5 +339,27 @@ export function stratumTone(rock: Hsl, planetId: number, index: number): Hsl {
   const u = f01(hash2(planetId ^ 0x5747a3, index));
   const v = f01(hash2(planetId ^ 0x22b19f, index));
   const y = luminanceOf(rock);
-  return atLuminance({ ...rock, s: Math.min(0.85, rock.s * (0.6 + v * 0.9)) }, Math.max(0.02, y * (0.55 + u * 0.85)));
+  return atLuminance({ ...rock, s: Math.min(0.85, rock.s * (0.6 + v * 0.9)) }, Math.max(0.02, y * (0.62 + u * 0.7)));
+}
+
+/**
+ * THE ROCK A WORLD IS MADE OF.
+ *
+ * Not its land colour a little darker, which is what this used to be, and which meant a green world's cliffs
+ * were green, a jungle's bedrock was jungle-coloured, and half of every surface view was a flat wall in the
+ * same hue as the grass on top of it. The ground line had contrast on one side only, and the one thing an
+ * edge-on world has to show -- what it is made of underneath -- said nothing at all.
+ *
+ * It is the GALAXY'S CHEMISTRY, which is what metallicity has meant in this project from the start: a
+ * metal-poor rim world builds in pale chalk and a core world in dark iron-stained stone. That was already true
+ * of the masonry, and it should always have been true of the bedrock the masonry is quarried from -- it is the
+ * one inheritance that legitimately spans a hundred billion stars, because it is chemistry rather than culture.
+ * The world's own hue is still in it, pulled most of the way toward the ore, so a red world's stone is red-ish
+ * stone rather than the same grey as everyone else's.
+ */
+export function rockTone(land: Hsl, ore: { hue: number; metallicity: number }): Hsl {
+  const dark = Math.min(1, Math.max(0, (ore.metallicity - 0.1) / 0.9));
+  const h = land.h + hueDelta(land.h, ore.hue) * 0.72;
+  const sat = Math.min(0.44, 0.09 + dark * 0.3);
+  return { h, s: sat, l: solveL(h, sat, Math.max(0.05, luminanceOf(land) * (0.74 - dark * 0.34))) };
 }

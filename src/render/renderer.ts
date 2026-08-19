@@ -52,7 +52,7 @@ const MIN_CHILD_PX = 1.1;
  */
 export const ANCESTOR_LIMIT_DIAGONALS = 64;
 /** Past this the node's own silhouette is off-screen anyway; iterate its children but skip its disc. */
-const MAX_SELF_DRAW_DIAGONALS = 2.5;
+export const MAX_SELF_DRAW_DIAGONALS = 2.5;
 /**
  * A planet keeps drawing its own body long past the general limit, because that is what paints the ground until its
  * regions take over -- and the two have to meet exactly.
@@ -287,7 +287,9 @@ export function render(
     const sn = ref.spin === 0 ? 0 : Math.sin(ref.spin);
     const px = (ax * c + ay * sn) / ref.rel;
     const py = (ay * c - ax * sn) / ref.rel;
-    if (Math.hypot(px, py) * r > limit) break;
+    if (!worthClimbing(LEVELS[parent.kind].placement, Math.hypot(ax, ay) * r, Math.hypot(px, py) * r, limit, diagonal)) {
+      break;
+    }
     centreX -= px * ref.ox - py * ref.oy;
     centreY -= py * ref.ox + px * ref.oy;
     ax = px;
@@ -328,7 +330,7 @@ export function render(
 
   // The planet's own disc is reached through the space-mode painter, which has no sky or viewport argument to take
   // one, so it is handed the frame's here instead. See `beginGroundFrame`.
-  beginGroundFrame(frame.sky, view.w, view.h, frame.up);
+  beginGroundFrame(frame.sky, view.w, view.h, frame.up, frame.ore);
 
   paint(frame, node, centreX, centreY, ax, ay, 0);
   stats.spritesPending = spritesPending();
@@ -361,6 +363,34 @@ function childFrame(
  * a planet is genuinely a ten-thousandth of a pixel. Without threading it through, the minimum-size
  * cull discards the very thing a system view exists to show.
  */
+/**
+ * Whether an ancestor is worth climbing to.
+ *
+ * For most of the ladder the question is about the ANCESTOR: past some size its own disc is off screen in every
+ * direction and the only reason to keep it is the siblings it holds, which stop mattering eventually too.
+ *
+ * FOR A RIM PARENT THE QUESTION IS ABOUT THE CHILD, and getting that wrong was the worst bug in the surface
+ * views. A rim parent stops drawing its own body early -- see PLANET_MAX_DIAGONALS -- so the ONLY thing painting
+ * the ground is its children, and the moment the climb drops it, every plate but the one in focus disappears and
+ * two thirds of the screen goes to bare sky. At region focus a planet works out at about sixty screen diagonals,
+ * which is close enough to the general limit that whether your neighbours existed came down to how lumpy the
+ * ground happened to be where you were standing.
+ *
+ * So a rim parent is kept for exactly as long as its children are smaller than the screen, which is exactly as
+ * long as their siblings can be seen. Above that the child covers the window on its own and there is nothing
+ * beside it to paint.
+ */
+function worthClimbing(
+  placement: string,
+  childPx: number,
+  parentPx: number,
+  limit: number,
+  diagonal: number,
+): boolean {
+  if (placement === 'rim') return childPx < MAX_SELF_DRAW_DIAGONALS * diagonal;
+  return parentPx <= limit;
+}
+
 /**
  * A point in camera-frame units, in final screen pixels.
  *
@@ -695,7 +725,7 @@ function drawDiscUpright(
     const traits = node.ground?.traits;
     if (!traits) return;
     // Returns the radius actually drawn, which may be the schematic floor rather than the true size.
-    frame.lastDrawnRadius = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits);
+    frame.lastDrawnRadius = drawPlanetIcon(ctx, sx, sy, rPx, node.id, traits, frame.ore);
     return;
   }
 
@@ -726,7 +756,7 @@ function drawDiscUpright(
     if (node.kind === 'system') {
       // Rings first, so bodies sit on top of their own orbits. Each ring takes the colour of the world on it, so a
       // system says which of its planets is which before any of them is big enough to resolve.
-      drawOrbitRings(ctx, sx, sy, rPx, node, cosmicPaletteOf(node.id).LIGHT);
+      drawOrbitRings(ctx, sx, sy, rPx, node, cosmicPaletteOf(node.id).LIGHT, frame.ore);
       // A system's content is its star, and the star is minute next to the system's own extent.
       drawStar(ctx, sx, sy, rPx, node.id);
     }

@@ -196,9 +196,20 @@ const main = async () => {
       };
       return w.__cam.node.ground ? w.__describeHere() : '';
     });
+    /**
+     * What the renderer actually did, beside what the generators say.
+     *
+     * A shot that comes back with the ground drawn across a third of the screen and bare sky either side looks
+     * like a terrain bug and is not one: it means the climb stopped at the focus node, so its SIBLINGS were never
+     * painted. Two numbers separate those cases at a glance, and they cost nothing.
+     */
+    const drew = await page.evaluate(() => {
+      const st = (window as unknown as { __lastStats: { topKind: string; draws: number; hits: unknown[] } }).__lastStats;
+      return `${st.topKind}/${st.hits.length}`;
+    });
     const name = `${String(found).padStart(2, '0')}-${LEVEL}`;
     await page.screenshot({ path: `${OUT}/${name}.png` });
-    console.log(`${name}  ${label}`);
+    console.log(`${name}  ${label}  [${drew}]`);
     found++;
   }
 

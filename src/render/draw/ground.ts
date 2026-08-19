@@ -8,7 +8,15 @@ import { surfaceColours, type Surface } from './planet.ts';
 import { drawStructures } from './structures.ts';
 import { drawFlora, drawGroundcover } from './flora.ts';
 import { daylight, type Sky } from './sky.ts';
-import { beachDepth, classifySkin, materialTone, skinDepth, strataFor, stratumTone } from './skin.ts';
+import {
+  beachDepth,
+  classifySkin,
+  materialTone,
+  rockTone,
+  skinDepth,
+  strataFor,
+  stratumTone,
+} from './skin.ts';
 
 /**
  * The ground, seen the way a two-dimensional creature would see it: edge on.
@@ -77,6 +85,8 @@ const PLANET_METRES = 2 ** LEVELS.planet.logSpan;
 let frameSky: Sky | null = null;
 /** The viewport, for the same reason: the disc painter has no view argument and most of a big disc is off screen. */
 let frameView = { w: 0, h: 0, diagonal: 1, cosUp: 1, sinUp: 0 };
+/** The enclosing galaxy's chemistry, which is what the bedrock is made of. See `rockTone`. */
+let frameOre = { hue: 30, metallicity: 0.4 };
 
 /**
  * `up` is the scene rotation, and the disc painter needs it to know where the window is.
@@ -88,9 +98,16 @@ let frameView = { w: 0, h: 0, diagonal: 1, cosUp: 1, sinUp: 0 };
  * disc is ever drawn under is the scene's own, since a planet turned by anything else is one seen from inside a
  * region, and by then it is far past the size at which it stops drawing itself. See PLANET_MAX_DIAGONALS.
  */
-export function beginGroundFrame(sky: Sky | null, w: number, h: number, up: number): void {
+export function beginGroundFrame(
+  sky: Sky | null,
+  w: number,
+  h: number,
+  up: number,
+  ore: { hue: number; metallicity: number },
+): void {
   frameSky = sky;
   frameView = { w, h, diagonal: Math.hypot(w, h), cosUp: Math.cos(up), sinUp: Math.sin(up) };
+  frameOre = ore;
 }
 
 /**
@@ -248,9 +265,9 @@ export function drawSurfacePlate(
    * disagree about where the sun is.
    */
   // 1. Rock: the deep body of the world, under everything the surface does.
-  const rockTone = daylight(atLuminance(s.land, Math.max(0.04, luminanceOf(s.land) * 0.62)), sky, shadowHue);
+  const rock = daylight(rockTone(s.land, ore), sky, shadowHue);
   rockPath();
-  ctx.fillStyle = css(rockTone);
+  ctx.fillStyle = css(rock);
   ctx.fill();
 
   /**
@@ -263,18 +280,17 @@ export function drawSurfacePlate(
    * showing at once.
    */
   const beds = strataFor(r / g.span, Math.min(PLATE_RIND, reach * g.span));
-  ctx.lineWidth = GROUND_INK_PX * 0.8;
   for (const bed of beds) {
-    const drop = bed.depth / g.span;
+    const top = bed.depth / g.span;
+    // A bed lies between its own depth and the next one down, which is twice as deep -- so the beds thicken
+    // downwards, exactly as a geometric family must, and the picture reads as layers rather than as ruled lines.
+    const bottom = Math.min(reach + 1, top * 2);
     ctx.beginPath();
-    for (let i = 0; i < samples; i++) {
-      const px = toX(line[i * 2]!);
-      const py = toY(line[i * 2 + 1]! - drop);
-      if (i === 0) ctx.moveTo(px, py);
-      else ctx.lineTo(px, py);
-    }
-    ctx.strokeStyle = css(stratumTone(rockTone, g.planetId, bed.index), bed.alpha);
-    ctx.stroke();
+    for (let i = 0; i < samples; i++) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]! - top));
+    for (let i = samples - 1; i >= 0; i--) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]! - bottom));
+    ctx.closePath();
+    ctx.fillStyle = css(stratumTone(rock, g.planetId, bed.index), bed.alpha);
+    ctx.fill();
   }
 
   /**
@@ -305,7 +321,7 @@ export function drawSurfacePlate(
     for (let i = run.from; i <= run.to; i++) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]!));
     for (let i = run.to; i >= run.from; i--) ctx.lineTo(toX(line[i * 2]!), toY(line[i * 2 + 1]! - depth));
     ctx.closePath();
-    ctx.fillStyle = css(daylight(materialTone(run.material, run.biome, s, g.traits), sky, shadowHue));
+    ctx.fillStyle = css(daylight(materialTone(run.material, run.biome, s, g.traits, ore), sky, shadowHue));
     ctx.fill();
   }
 
@@ -501,9 +517,9 @@ export function drawPlanetBody(
    * with the land colour and calling the result a planet is what made the rind read as one flat thing with a
    * circle drawn on it.
    */
-  const rockTone = lit(atLuminance(s.land, Math.max(0.04, luminanceOf(s.land) * 0.62)));
+  const rock = lit(rockTone(s.land, frameOre));
   surfaceCurve();
-  ctx.fillStyle = css(rockTone);
+  ctx.fillStyle = css(rock);
   ctx.fill();
 
   /**
@@ -548,17 +564,14 @@ export function drawPlanetBody(
    * snapping in at each rung.
    */
   const beds = strataFor(r, 1 - crust);
-  ctx.lineWidth = GROUND_INK_PX * 0.8;
   for (const bed of beds) {
+    const bottom = Math.min(1 - crust, bed.depth * 2);
     ctx.beginPath();
-    for (let i = 0; i <= samples; i++) {
-      const v = rad[i]! - bed.depth;
-      if (i === 0) ctx.moveTo(px(i, v), py(i, v));
-      else ctx.lineTo(px(i, v), py(i, v));
-    }
+    for (let i = 0; i <= samples; i++) ctx.lineTo(px(i, rad[i]! - bed.depth), py(i, rad[i]! - bed.depth));
+    for (let i = samples; i >= 0; i--) ctx.lineTo(px(i, rad[i]! - bottom), py(i, rad[i]! - bottom));
     ctx.closePath();
-    ctx.strokeStyle = css(stratumTone(rockTone, id, bed.index), bed.alpha);
-    ctx.stroke();
+    ctx.fillStyle = css(stratumTone(rock, id, bed.index), bed.alpha);
+    ctx.fill();
   }
 
   /**
@@ -582,7 +595,7 @@ export function drawPlanetBody(
     for (let i = a; i <= b; i++) ctx.lineTo(px(i, rad[i]!), py(i, rad[i]!));
     for (let i = b; i >= a; i--) ctx.lineTo(px(i, rad[i]! - depth), py(i, rad[i]! - depth));
     ctx.closePath();
-    ctx.fillStyle = css(lit(materialTone(run.material, run.biome, s, traits)));
+    ctx.fillStyle = css(lit(materialTone(run.material, run.biome, s, traits, frameOre)));
     ctx.fill();
   }
 
