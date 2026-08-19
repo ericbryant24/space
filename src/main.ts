@@ -443,12 +443,13 @@ function travelTo(hit: PickResult): boolean {
  * it: see `nearestRimAt`. Only the zoom does this; the reticle keeps the strict test, because a mark drawn a
  * third of a screen from the cursor would be claiming something untrue about where the cursor is.
  */
-input.onZoomIntent = (x, y) => {
+input.onZoomIntent = (x, y, _dz, anchored) => {
   if (flight) return;
 
-  // Squarely on something, and not already holding it: take it as the destination.
+  // Squarely on something, and not already holding it: take it as the destination. Never for an anchored
+  // gesture -- see InputState.onZoomIntent. Two fingers are already holding the view where they want it.
   const under = pick(x, y);
-  if (under && Math.hypot(under.xPx - x, under.yPx - y) <= Math.max(3, under.rPx)) {
+  if (!anchored && under && Math.hypot(under.xPx - x, under.yPx - y) <= Math.max(3, under.rPx)) {
     if (!tracked || !samePath(under.path, tracked)) {
       tracked = under.path;
       acquired = false;
@@ -478,7 +479,8 @@ input.onZoomIntent = (x, y) => {
    * substituting one for the other is what made this feel unpredictable in the first place. Whatever
    * happens, it can only ever go to the thing already marked in the middle of the screen.
    */
-  if (!tracked || !acquired) return;
+  // A flight is the biggest takeover of all, so an anchored gesture may not start one either.
+  if (anchored || !tracked || !acquired) return;
   const at = pick(view.w / 2, view.h / 2);
   if (!at || !samePath(at.path, tracked)) return;
   if (doublingsAway(at) > LOCKED_FLY_DOUBLINGS) travelTo(at);

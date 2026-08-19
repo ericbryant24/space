@@ -29,8 +29,17 @@ export interface InputState {
    * taking over what the view is centred on is a decision, not a rate. Firing it per event meant a single
    * flick re-decided the destination thirty times, each one able to hand the whole gesture to a two-second
    * flight. A gesture ends when the events stop for GESTURE_IDLE_MS, or when the fingers lift.
+   *
+   * `anchored` says the gesture already knows where it is going in the plane, which a PINCH does and a wheel
+   * does not. Two fingers name a point continuously and hold it under themselves; a wheel notch is a discrete
+   * step with nothing to converge on, which is the whole reason this callback exists. So an anchored gesture
+   * must not be allowed to take over what the view is centred on -- when it did, finishing a pinch dragged the
+   * view sixteen pixels onto whatever star happened to be near the middle, which is the pinch complaint this
+   * project has already answered once. What an anchored gesture still needs is the other half: over a planet's
+   * rock nothing resolves under the fingers at all, and without a slot to aim at a pinch cannot reach the
+   * ground. Naming that is not taking over; it is answering a question the fingers cannot.
    */
-  onZoomIntent: ((x: number, y: number, dz: number) => void) | null;
+  onZoomIntent: ((x: number, y: number, dz: number, anchored: boolean) => void) | null;
   /** Move the zoom target by `dz` doublings, clamped to the reachable range. The only way it may grow. */
   zoomBy(dz: number): void;
   /** Set by navigation to cancel an in-flight spring, e.g. when a gesture becomes a flight. */
@@ -275,7 +284,7 @@ export function attachInput(
       // middle of the screen and the zoom converges on it instead of diverging away from it.
       if (dz > 0 && mayName) {
         zoomIntentFired = true;
-        input.onZoomIntent?.(p.x, p.y, dz);
+        input.onZoomIntent?.(p.x, p.y, dz, false);
       }
       input.zoomBy(dz);
       wake();
@@ -347,7 +356,7 @@ export function attachInput(
         if (dz > 0 && mayName) {
           zoomIntentFired = true;
           const c = centroid(pointers);
-          input.onZoomIntent?.(c.x, c.y, dz);
+          input.onZoomIntent?.(c.x, c.y, dz, true);
         }
         input.zoomBy(dz);
       }
