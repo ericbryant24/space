@@ -51,6 +51,18 @@ export interface Facade {
   readonly metallicity: number;
   readonly civic: boolean;
   /**
+   * How far gone, 0 for a lived-in building and 0.35 to 1 for one in a town that stands empty.
+   *
+   * A PROPERTY OF THE TOWN, not of the house: when the people left they all left, so every building on the plate
+   * carries the same number and the street reads as one abandonment rather than as a scatter of derelicts. What
+   * varies per building is which end the roof came off, which is its own to choose.
+   *
+   * Nothing here is added for a ruin. Everything is SUBTRACTED -- the lamplight, the smoke, the sign, the people,
+   * the glass, part of the roof and part of the wall head -- which is what makes it read from a region away
+   * without a single mark being drawn that is not the town itself.
+   */
+  readonly ruin: number;
+  /**
    * Tallest this building may stand above the ground, in screen pixels.
    *
    * A building's frame is sized by its footprint, so a world whose grammar builds tall produced walls that ran
@@ -109,19 +121,100 @@ function palette(f: Facade): Palette {
   const roofHue = hue + 18 + dark * 22;
   const roofY = Math.max(0.06, y * (0.46 + dark * 0.1));
   const trimY = Math.min(0.9, y + 0.16);
+
+  /**
+   * WEATHER, on a building nobody maintains.
+   *
+   * Paint is the first thing to go and the colour goes with it, so a ruin's fills lose most of their saturation
+   * and a little of their value -- towards the stone underneath rather than towards grey, because the wall was
+   * always the galaxy's own ore and that is what is left when the finish has gone. Hue is untouched: an iron-rich
+   * world's ruins are still rust-coloured, which is the whole point of the ore inheritance.
+   *
+   * The one colour that moves the other way is the glass, and it goes to nearly nothing. An empty opening is not
+   * a dark window, it is a hole with the inside of the building behind it, and that reads at any size.
+   */
+  const worn = (c: Hsl): Hsl =>
+    f.ruin <= 0 ? c : { h: c.h, s: c.s * (1 - 0.62 * f.ruin), l: c.l * (1 - 0.1 * f.ruin) };
+
   return {
-    wall,
-    wallShade: shade(wall, light.shadowHue, 1),
-    trim: daylight({ h: hue, s: sat * 0.8, l: solveL(hue, sat * 0.8, trimY) }, f.sky, light.shadowHue),
-    roof: daylight({ h: roofHue, s: sat + 0.14, l: solveL(roofHue, sat + 0.14, roofY) }, f.sky, light.shadowHue),
-    glass: daylight({ h: f.traits.atmHue, s: 0.3, l: solveL(f.traits.atmHue, 0.3, 0.14) }, f.sky, light.shadowHue),
+    wall: worn(wall),
+    wallShade: worn(shade(wall, light.shadowHue, 1)),
+    trim: worn(daylight({ h: hue, s: sat * 0.8, l: solveL(hue, sat * 0.8, trimY) }, f.sky, light.shadowHue)),
+    roof: worn(daylight({ h: roofHue, s: sat + 0.14, l: solveL(roofHue, sat + 0.14, roofY) }, f.sky, light.shadowHue)),
+    glass: daylight(
+      { h: f.traits.atmHue, s: 0.3, l: solveL(f.traits.atmHue, 0.3, f.ruin > 0 ? 0.03 : 0.14) },
+      f.sky,
+      light.shadowHue,
+    ),
     // Lamplight is not daylight and must not be dimmed by it: this is the one colour on a facade that gets
-    // BRIGHTER after dark, which is what makes a village read as inhabited at night.
+    // BRIGHTER after dark, which is what makes a village read as inhabited at night. A ruin never uses it.
     lit: atLuminance({ h: (light.colour.h + 42) % 360, s: 0.62, l: 0.7 }, 0.78),
     ink: { h: hue, s: 0.3, l: solveL(hue, 0.3, 0.05) },
-    snow: daylight({ h: f.traits.atmHue, s: 0.06, l: 0.94 }, f.sky, light.shadowHue),
+    snow: worn(daylight({ h: f.traits.atmHue, s: 0.06, l: 0.94 }, f.sky, light.shadowHue)),
   };
 }
+
+/** Which end of a building the roof came off. Its own to choose, and the wall and the roof must agree. */
+export function ruinOpenRight(id: number): boolean {
+  return f01(hash2(id, 0x9a)) < 0.5;
+}
+
+/**
+ * THE MASS OF A BUILDING, and the one shape the silhouette and the elevation have to agree on.
+ *
+ * Exported because both draw it. A building under twenty-six pixels is a plain block and above that a full
+ * elevation, and the two are CROSSFADED rather than switched -- so if the block were a rectangle while the
+ * elevation had a broken head, a ruin would grow its roofline back over the threshold and then lose it again.
+ *
+ * For a lived-in building this traces exactly the rectangle it always was: up the left side, across the head,
+ * down the right. Fill closes the bottom for itself, so one path serves the fill and the ink both, and the ink
+ * gets no line along the ground, which is what it wanted anyway.
+ *
+ * For a ruin the head steps DOWN towards whichever end lost its roof. Four steps rather than a slope, because a
+ * wall does not erode, it falls -- and courses of masonry come away in blocks.
+ */
+export function wallPath(
+  ctx: CanvasRenderingContext2D,
+  cx: number,
+  groundY: number,
+  eaveY: number,
+  half: number,
+  ruin: number,
+  id: number,
+): void {
+  if (ruin <= 0) {
+    ctx.moveTo(cx - half, groundY);
+    ctx.lineTo(cx - half, eaveY);
+    ctx.lineTo(cx + half, eaveY);
+    ctx.lineTo(cx + half, groundY);
+    return;
+  }
+  const open = ruinOpenRight(id);
+  const lost = (groundY - eaveY) * 0.42 * ruin;
+  /**
+   * Four courses of head, walked left to right in both directions.
+   *
+   * The mirror is taken on the RUN rather than on the corner list, which is the whole subtlety: mirroring the
+   * corners in place makes the path double back on itself and the fill comes out as a bow tie. Reversing the runs
+   * and swapping each one's ends keeps the traversal monotonic in x, so one path serves the fill and the ink and
+   * neither can self-intersect. No allocation either -- this runs once per building per frame.
+   */
+  const n = RUIN_GONE.length;
+  ctx.moveTo(cx - half, groundY);
+  for (let j = 0; j < n; j++) {
+    const k = open ? j : n - 1 - j;
+    const a = open ? RUIN_AT[k]! : 1 - RUIN_AT[k + 1]!;
+    const b = open ? RUIN_AT[k + 1]! : 1 - RUIN_AT[k]!;
+    const y = eaveY + lost * RUIN_GONE[k]!;
+    ctx.lineTo(cx - half + half * 2 * a, y);
+    ctx.lineTo(cx - half + half * 2 * b, y);
+  }
+  ctx.lineTo(cx + half, groundY);
+}
+
+/** Where the courses of a broken head begin and end across the front, and how much is gone from each. */
+const RUIN_AT = [0, 0.32, 0.56, 0.79, 1];
+const RUIN_GONE = [0, 0.16, 0.48, 0.82];
 
 /** One window opening, in the planet's own silhouette. */
 function windowPath(ctx: CanvasRenderingContext2D, shape: Window, motif: Motif, x: number, y: number, w: number, h: number): void {
@@ -343,11 +436,25 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
     ctx.fill();
   }
 
-  // 2. Wall.
+  // 2. Wall. One path, shared with the silhouette and with the ink, so a broken head is broken in all three.
   ctx.fillStyle = css(p.wall);
-  ctx.fillRect(cx - half, eaveY, half * 2, height);
+  ctx.beginPath();
+  wallPath(ctx, cx, groundY, eaveY, half, f.ruin, f.id);
+  ctx.fill();
 
-  // 3. Wall division. What a world does with a blank wall, and it is a strong per-planet signature.
+  /**
+   * 3. Wall division. What a world does with a blank wall, and it is a strong per-planet signature.
+   *
+   * Bounded by the wall on a ruin, because every one of these cases is drawn from `eaveY` downwards on the
+   * assumption that the wall reaches it -- so a band, a pilaster or a timber frame painted straight over the part
+   * of the head that has fallen, and the broken silhouette disappeared under its own trim.
+   */
+  if (f.ruin > 0) {
+    ctx.save();
+    ctx.beginPath();
+    wallPath(ctx, cx, groundY, eaveY, half, f.ruin, f.id);
+    ctx.clip();
+  }
   ctx.fillStyle = css(p.trim);
   switch (arch.wall) {
     case 'banded':
@@ -384,6 +491,7 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
     case 'none':
       break;
   }
+  if (f.ruin > 0) ctx.restore();
 
   // 4. Plinth, and a snow skirt where snow lies against a wall all winter.
   const plinthH = arch.plinth * storeyH;
@@ -421,7 +529,9 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
         if (arch.rhythm === 'irregular') fx += (f01(hash3(f.id, s, c)) - 0.5) * 0.12;
         const x = cx - half + half * 2 * Math.min(0.92, Math.max(0.08, fx));
         if (s === 0 && Math.abs(x - (cx + (look.doorRight ? 1 : -1) * half * 0.5)) < winW) continue;
-        const lit = f.sky.night > 0.3 && f01(hash3(f.id, 0x11 + s, c)) < 0.55 * f.sky.night;
+        // Nothing is lit in an empty house, at any hour. This is the cue that carries furthest: a dark town
+        // among lit ones is visible from a region away, and it is the town itself doing the telling.
+        const lit = f.ruin <= 0 && f.sky.night > 0.3 && f01(hash3(f.id, 0x11 + s, c)) < 0.55 * f.sky.night;
         ctx.fillStyle = css(lit ? p.lit : p.glass);
         ctx.beginPath();
         windowPath(ctx, look.window, f.motif, x, rowY, winW, winH);
@@ -437,46 +547,122 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
   const doorX = cx + (look.doorRight ? 1 : -1) * half * 0.5;
   if (doorW > 1.4) {
     ctx.globalAlpha = part(doorW, 1.4, 3);
-    ctx.fillStyle = css(atLuminance(p.trim, Math.max(0.04, luminanceOf(p.trim) * 0.42)));
+    // A ruin has no door, only the doorway: the same near-black the empty windows use, so the front reads as
+    // openings rather than as panels.
+    ctx.fillStyle = css(f.ruin > 0 ? p.glass : atLuminance(p.trim, Math.max(0.04, luminanceOf(p.trim) * 0.42)));
     ctx.fillRect(doorX - doorW / 2, groundY - doorH, doorW, doorH);
-    if (arch.ornament > 0.4 && doorW > 4.5) {
+    if (arch.ornament > 0.4 && doorW > 4.5 && f.ruin <= 0) {
       // A bracket or hood over the door, which is where a world puts its ornament first.
       ctx.globalAlpha = part(doorW, 4.5, 8);
       ctx.fillStyle = css(p.trim);
       ctx.fillRect(doorX - doorW * 0.8, groundY - doorH - w * 1.6, doorW * 1.6, w * 1.6);
       ctx.globalAlpha = part(doorW, 1.4, 3);
     }
-    potPlant(ctx, f, doorX + doorW * (look.doorRight ? -1.1 : 1.1), groundY, Math.min(doorH * 0.42, half * 0.3));
+    /**
+     * The plant by the door, and on a ruin the plant IN it.
+     *
+     * The same five numbers either way -- this world's crown shape, this world's leaf hue, the biome's own scale --
+     * because the biosphere does not care who lives here. What changes is that nobody is keeping it in a pot and
+     * nobody is keeping it out of the doorway, so it stands in the opening and stands taller. The reading is that
+     * the world has taken the place back, and it costs one branch.
+     */
+    if (f.ruin > 0) {
+      plant(ctx, f, doorX, groundY, Math.min(doorH * 0.8, half * 0.55), false);
+    } else {
+      plant(ctx, f, doorX + doorW * (look.doorRight ? -1.1 : 1.1), groundY, Math.min(doorH * 0.42, half * 0.3), true);
+    }
     ctx.globalAlpha = base;
   }
 
-  // 7. Roof, its texture, and its eaves.
+  /**
+   * 7. Roof, its texture, and its eaves -- and on a ruin, only as much of it as is still up.
+   *
+   * A roof does not thin out, it FAILS AT ONE END, so this is a clip rather than a fade: the covering stops part
+   * way across and what is past it is sky. The fraction left standing is the one number a building chooses for
+   * itself here, and the end it fails at is the same end the wall head drops towards -- `ruinOpenRight` is asked
+   * once and both read it, or the roof would sit over the stub and hang off the tall side.
+   *
+   * The clip has to wrap the covering, the snow on it and the ink over it, because all three are the roof.
+   */
+  const rise = half * pitch;
+  const kept = 1 - 0.55 * f.ruin;
+  const openRight = ruinOpenRight(f.id);
+  const roofClip = (draw: () => void): void => {
+    if (f.ruin <= 0) {
+      draw();
+      return;
+    }
+    const span = (half + over) * 2;
+    const x0 = openRight ? cx - half - over : cx + half + over - span * kept;
+    ctx.save();
+    ctx.beginPath();
+    ctx.rect(x0, eaveY - rise * 2.6 - 4, span * kept, rise * 2.6 + 8);
+    ctx.clip();
+    draw();
+    ctx.restore();
+  };
+
   ctx.fillStyle = css(p.roof);
-  ctx.beginPath();
-  roofPath(ctx, look.roof, cx, eaveY, half, pitch, over);
-  ctx.fill();
+  roofClip(() => {
+    ctx.beginPath();
+    roofPath(ctx, look.roof, cx, eaveY, half, pitch, over);
+    ctx.fill();
+  });
   // Snow lies on the roof of a cold world. One flat wedge along the top: the cheapest possible statement of
   // climate, and it reads from across the street.
   if (cold && look.roof !== 'flat' && f.climate.temp < 268) {
-    ctx.save();
+    roofClip(() => {
+      ctx.save();
+      ctx.beginPath();
+      roofPath(ctx, look.roof, cx, eaveY, half, pitch, over);
+      ctx.clip();
+      ctx.fillStyle = css(p.snow, 0.92);
+      ctx.beginPath();
+      roofPath(ctx, look.roof, cx, eaveY - half * pitch * 0.22, half, pitch, over);
+      ctx.fill();
+      ctx.restore();
+    });
+  }
+
+  /**
+   * The rafters, over the open end.
+   *
+   * Without them the missing roof reads as a roof that was built short, which says nothing. Four ink lines from
+   * the wall head up towards where the ridge was is the whole statement, and it is exactly what is left of a
+   * timber roof -- so it is structure rather than a symbol for structure.
+   */
+  if (f.ruin > 0 && rise > 2 && half > 7) {
+    const lost = (groundY - eaveY) * 0.42 * f.ruin;
+    const dir = openRight ? 1 : -1;
+    // From where the covering stops to the open corner. Each stub stands on the wall head and leans back towards
+    // the ridge, and they shorten towards the corner, because that is the end that went first.
+    const x0 = cx + dir * half * (2 * kept - 1);
+    const x1 = cx + dir * half;
+    ctx.globalAlpha = part(half, 7, 13) * 0.8;
+    ctx.strokeStyle = css(p.ink, 0.75);
+    ctx.lineWidth = Math.max(0.9, w * 0.7);
     ctx.beginPath();
-    roofPath(ctx, look.roof, cx, eaveY, half, pitch, over);
-    ctx.clip();
-    ctx.fillStyle = css(p.snow, 0.92);
-    ctx.beginPath();
-    roofPath(ctx, look.roof, cx, eaveY - half * pitch * 0.22, half, pitch, over);
-    ctx.fill();
-    ctx.restore();
+    for (let i = 1; i <= 3; i++) {
+      const t = i / 4;
+      const x = x0 + (x1 - x0) * t;
+      ctx.moveTo(x, eaveY + lost * t);
+      ctx.lineTo(x - dir * rise * 0.18, eaveY - rise * 0.55 * (1 - t));
+    }
+    ctx.stroke();
+    ctx.globalAlpha = base;
   }
   if (over > 0.8) {
-    // The eave line, in ink: a deep overhang is a wet world's signature and it needs an edge to read.
+    // The eave line, in ink: a deep overhang is a wet world's signature and it needs an edge to read. It is part
+    // of the roof, so it takes the roof's clip -- otherwise a ruin kept a full-width eave over nothing.
     ctx.globalAlpha = part(over, 0.8, 2);
     ctx.strokeStyle = css(p.ink, 0.6);
     ctx.lineWidth = w;
-    ctx.beginPath();
-    ctx.moveTo(cx - half - over, eaveY);
-    ctx.lineTo(cx + half + over, eaveY);
-    ctx.stroke();
+    roofClip(() => {
+      ctx.beginPath();
+      ctx.moveTo(cx - half - over, eaveY);
+      ctx.lineTo(cx + half + over, eaveY);
+      ctx.stroke();
+    });
     ctx.globalAlpha = base;
   }
 
@@ -485,17 +671,20 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
     ctx.globalAlpha = part(half, 6, 11);
     const chX = cx + (look.doorRight ? -1 : 1) * half * 0.55;
     const chW = Math.max(2, half * 0.16);
-    const chTop = eaveY - half * pitch * 0.8 - storeyH * 0.3;
+    // A chimney is masonry and outlasts the roof, so an empty house keeps its stack -- shortened, because the
+    // top courses are the ones that come down, and with nothing coming out of it.
+    const chTop = eaveY - half * pitch * 0.8 * (1 - f.ruin * 0.6) - storeyH * 0.3 * (1 - f.ruin * 0.5);
     ctx.fillStyle = css(p.trim);
     ctx.fillRect(chX - chW / 2, chTop, chW, groundY - chTop - height * 0.02);
     ctx.fillStyle = css(p.wallShade);
     ctx.fillRect(chX - chW * 0.7, chTop, chW * 1.4, chW * 0.5);
-    smoke(ctx, f, chX, chTop, chW);
+    if (f.ruin <= 0) smoke(ctx, f, chX, chTop, chW);
     ctx.globalAlpha = base;
   }
 
   // 9. The sign, in this world's own writing, spelling this building's own name.
-  if (arch.sign !== 'none' && half > 12) {
+  // The board comes down with everything else that was not stone; a ruin has no sign to read.
+  if (arch.sign !== 'none' && half > 12 && f.ruin <= 0) {
     const h = Math.min(storeyH * 0.3, half * 0.24);
     const width = scriptWidth(f.script, f.sign, h);
     if (width > 3 && width < half * 2.4) {
@@ -535,17 +724,16 @@ export function drawFacade(ctx: CanvasRenderingContext2D, cx: number, groundY: n
   ctx.strokeStyle = css(p.ink);
   ctx.lineWidth = w;
   ctx.beginPath();
-  ctx.moveTo(cx - half, groundY);
-  ctx.lineTo(cx - half, eaveY);
-  ctx.lineTo(cx + half, eaveY);
-  ctx.lineTo(cx + half, groundY);
+  wallPath(ctx, cx, groundY, eaveY, half, f.ruin, f.id);
   ctx.stroke();
-  ctx.beginPath();
-  roofPath(ctx, look.roof, cx, eaveY, half, pitch, over);
-  ctx.stroke();
+  roofClip(() => {
+    ctx.beginPath();
+    roofPath(ctx, look.roof, cx, eaveY, half, pitch, over);
+    ctx.stroke();
+  });
 
   // 12. People, so the whole thing has a scale you can feel.
-  const people = half > 18 ? 1 + Math.floor(f01(hash2(f.id, 0x5e)) * 2.4) : 0;
+  const people = half > 18 && f.ruin <= 0 ? 1 + Math.floor(f01(hash2(f.id, 0x5e)) * 2.4) : 0;
   if (people > 0) ctx.globalAlpha = part(half, 18, 30);
   for (let i = 0; i < people; i++) {
     const t = f01(hash3(f.id, 0x5f, i));
@@ -579,26 +767,28 @@ function smoke(ctx: CanvasRenderingContext2D, f: Facade, x: number, y: number, w
 }
 
 /**
- * The plant by the door.
+ * The plant by the door -- or, with no pot, the one standing in the doorway of a house nobody comes out of.
  *
  * The smallest appearance of the planet's biosphere, and the one that most rewards noticing: the crown shape
  * beside a doorway is the same crown shape on the forested hills three levels up, because both come from the
  * same five numbers rolled once for the world.
  */
-function potPlant(ctx: CanvasRenderingContext2D, f: Facade, x: number, groundY: number, h: number): void {
+function plant(ctx: CanvasRenderingContext2D, f: Facade, x: number, groundY: number, h: number, pot: boolean): void {
   if (h < 4) return;
   const bio = biosphereOf(f.planetId);
   const stand = standingIn(bio, f.climate.biome);
   if (stand.heightM <= 0) return;
-  const potH = h * 0.32;
-  ctx.fillStyle = css(shade({ h: f.oreHue, s: 0.28, l: 0.4 }, f.traits.starLight.shadowHue, 0.6));
-  ctx.beginPath();
-  ctx.moveTo(x - potH * 0.62, groundY - potH);
-  ctx.lineTo(x + potH * 0.62, groundY - potH);
-  ctx.lineTo(x + potH * 0.44, groundY);
-  ctx.lineTo(x - potH * 0.44, groundY);
-  ctx.closePath();
-  ctx.fill();
+  const potH = pot ? h * 0.32 : 0;
+  if (pot) {
+    ctx.fillStyle = css(shade({ h: f.oreHue, s: 0.28, l: 0.4 }, f.traits.starLight.shadowHue, 0.6));
+    ctx.beginPath();
+    ctx.moveTo(x - potH * 0.62, groundY - potH);
+    ctx.lineTo(x + potH * 0.62, groundY - potH);
+    ctx.lineTo(x + potH * 0.44, groundY);
+    ctx.lineTo(x - potH * 0.44, groundY);
+    ctx.closePath();
+    ctx.fill();
+  }
   const leaf = leafColour(bio, stand.tone, f.sky, f.traits.starLight.shadowHue);
   ctx.fillStyle = css(leaf);
   ctx.strokeStyle = css(leaf);

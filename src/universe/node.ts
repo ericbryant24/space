@@ -17,6 +17,16 @@ export interface Cell {
 export interface Node {
   readonly kind: Kind;
   readonly id: number;
+  /**
+   * The id of the node this one hangs off, or 0 at the root.
+   *
+   * A node's traits are a pure function of its own address, so almost nothing needs this -- but some facts belong
+   * to a PARENT and are read from the child. Whether a town stands empty is one: it is a property of the town, and
+   * the last rung of the descent is a single building inside that town, which has to know it or it would grow
+   * windows and lit rooms again at the moment you arrived. Carried rather than looked up, because `makeChild` has
+   * the parent in hand and the tree is not available to a pure function.
+   */
+  readonly parentId: number;
   /** log2(radius in metres). Varies per node around its level's nominal value. */
   readonly logSpan: number;
   /** Anchor cell at each ancestor, root-first. Empty at the root. This IS the permalink. */
@@ -117,7 +127,7 @@ export interface ChildRef {
 }
 
 export function rootNode(seed: number): Node {
-  return { kind: ROOT_KIND, id: hash(0x5eed, seed), logSpan: LEVELS[ROOT_KIND].logSpan, path: [], ground: null };
+  return { kind: ROOT_KIND, id: hash(0x5eed, seed), parentId: 0, logSpan: LEVELS[ROOT_KIND].logSpan, path: [], ground: null };
 }
 
 export function cellsPerAxis(k: number): number {
@@ -195,6 +205,7 @@ export function makeChild(parent: Node, ref: ChildRef): Node {
   return {
     kind: ref.kind,
     id: ref.id,
+    parentId: parent.id,
     logSpan: ref.logSpan,
     path: [...parent.path, ref.cell],
     ground: groundFor(parent, ref),

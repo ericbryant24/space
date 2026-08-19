@@ -290,7 +290,7 @@ test('orbiting bodies are slow enough to point at', () => {
   // a four-pixel dot sat under the cursor for about a tenth of a second. Aiming at one was impossible.
   const tree = new Tree(0x51ace);
   // A synthetic system node is enough: only its id and logSpan matter to the orbit maths.
-  const system: Node = { ...{ kind: 'system', id: 0x5157, logSpan: LEVELS.system.logSpan, path: [{ cx: 1, cy: 1 }] }, ground: null };
+  const system: Node = { ...{ kind: 'system', id: 0x5157, parentId: 0, logSpan: LEVELS.system.logSpan, path: [{ cx: 1, cy: 1 }] }, ground: null };
   const count = orbitCount(system);
   assert.ok(count > 0, 'need a system with planets to measure');
 

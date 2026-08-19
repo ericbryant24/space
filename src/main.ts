@@ -20,7 +20,9 @@ import {
   rimChildren,
   seaHeightOf,
   type Cell,
+  type Node,
 } from './universe/node.ts';
+import { isRuin } from './universe/rarity.ts';
 import { HABITABLE_THRESHOLD } from './universe/gen/planet.ts';
 import { LEVELS, ROOT_KIND } from './universe/schema.ts';
 import { Tree } from './universe/tree.ts';
@@ -712,6 +714,32 @@ function zoomStep(dz: number): void {
   loop.wake();
 }
 
+/**
+ * Walk the camera along its parent's rim until a slot satisfies `want`.
+ *
+ * Shared by the debug seeks. Waking the loop is not optional: teleporting the camera without it leaves the render
+ * loop asleep, so the next screenshot is the frame from BEFORE the jump -- which read as houses drawn in the
+ * wrong place for an afternoon.
+ */
+function seekAlongRim(want: (node: Node) => boolean, limit: number): boolean {
+  loop.wake();
+  for (let i = 0; i < limit; i++) {
+    if (want(cam.node)) return true;
+    const parent = tree.parentOf(cam.node);
+    const ref = tree.refOf(cam.node);
+    if (!parent || !ref) return false;
+    const next = rimChild(parent, ref.cell.cx + 1);
+    if (!next) return false;
+    cam.node = makeChild(parent, next);
+    cam.k = 0;
+    cam.cx = 0;
+    cam.cy = 0;
+    cam.fx = 0;
+    cam.fy = 0;
+  }
+  return want(cam.node);
+}
+
 Object.assign(window as unknown as Record<string, unknown>, {
   __cam: cam,
   __tree: tree,
@@ -789,26 +817,13 @@ Object.assign(window as unknown as Record<string, unknown>, {
    * without `updateFocus` doing anything about it, so the focus never changes and the search never moves. This
    * rebases properly, one slot per step, landing at the neighbour's centre.
    */
-  __seekInhabited: (limit = 800): boolean => {
-    // Waking is not optional. Teleporting the camera without it leaves the render loop asleep, so the next
-    // screenshot is the frame from BEFORE the jump -- which read as houses drawn in the wrong place.
-    loop.wake();
-    for (let i = 0; i < limit; i++) {
-      if (isInhabited(cam.node)) return true;
-      const parent = tree.parentOf(cam.node);
-      const ref = tree.refOf(cam.node);
-      if (!parent || !ref) return false;
-      const next = rimChild(parent, ref.cell.cx + 1);
-      if (!next) return false;
-      cam.node = makeChild(parent, next);
-      cam.k = 0;
-      cam.cx = 0;
-      cam.cy = 0;
-      cam.fx = 0;
-      cam.fy = 0;
-    }
-    return isInhabited(cam.node);
-  },
+  __seekInhabited: (limit = 800): boolean => seekAlongRim((n) => isInhabited(n), limit),
+  /**
+   * Step along the rim until the camera is over a town that stands empty. Debug only, and it exists because a
+   * rare place is hard to review: one settlement in a hundred and twenty is a ruin, so finding one by hand is
+   * a hundred and twenty descents. Same walk as `__seekInhabited`, one more condition.
+   */
+  __seekRuin: (limit = 4000): boolean => seekAlongRim((n) => isInhabited(n) && isRuin(n.id), limit),
   /** The focus node's ground line sampled across its own frame, plus its water line. Debug only. */
   __plate: () => {
     const g = cam.node.ground;

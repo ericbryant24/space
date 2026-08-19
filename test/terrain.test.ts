@@ -35,6 +35,7 @@ const worlds_ = () => {
 const planetNode = (id: number, traits: ReturnType<typeof planetTraits>): Node => ({
   kind: 'planet',
   id,
+  parentId: 0,
   logSpan: LEVELS.planet.logSpan,
   path: [],
   ground: { planetId: id, traits, theta: 0, span: 1, baseRadius: 0 },

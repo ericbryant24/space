@@ -2,6 +2,7 @@ import { formatDistance } from '../universe/schema.ts';
 import type { PlanetCulture } from '../universe/gen/culture.ts';
 import type { PlanetTraits } from '../universe/gen/planet.ts';
 import { f01, hash2, pick } from '../core/rng.ts';
+import { isRuin, ruinYears } from '../universe/rarity.ts';
 
 /**
  * The Almanac's voice.
@@ -51,6 +52,9 @@ export function settlementLine(culture: PlanetCulture, traits: PlanetTraits, id:
   const trades = ['fish', 'cut reed', 'fire clay', 'quarry stone', 'keep bees', 'salt the flats', 'mend nets', 'burn lime'];
   const pop = Math.max(40, Math.round((culture.population / 900) * (0.4 + f01(hash2(id, 0x7f1)) * 2.2)));
   const roof = architectureClause(traits);
+  // One town in a hundred and twenty is empty, and the sentence has to say so rather than describe a trade
+  // nobody there practises any more. The count of years is the same number the ruin is drawn from.
+  if (isRuin(id)) return `${name}, empty ${ruinYears(id)} years, ${roof}. The roofs are down and the wells are dry.`;
   return `${name}, a town of ${formatPopulation(pop)}, ${roof}. Most of them ${pick(hash2(id, 0x7f2), trades)}.`;
 }
 

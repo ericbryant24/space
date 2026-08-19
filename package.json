@@ -18,6 +18,7 @@
     "seams": "node tools/seam-check.ts",
     "marks": "node tools/marks-check.ts",
     "pops": "node tools/pop-check.ts",
+    "ruins": "node tools/ruin-shot.ts",
     "proto": "node proto/bundle.mjs && node tools/proto-shots.mjs"
   },
   "devDependencies": {

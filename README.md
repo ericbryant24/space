@@ -63,24 +63,56 @@ npm run typecheck
 npm run build
 ```
 
-Three harnesses drive the real page in Chromium, and each one earned its keep by finding something:
+Nine harnesses drive the real page in Chromium, and every one of them earned its keep by finding
+something that reading the code would not have:
 
 ```sh
 npm run shots      # dives the full ladder, one PNG per rung
+npm run worlds     # eight DIFFERENT planets, because one planet says nothing about a generator
 npm run perf       # steady-state frame times, sampled between rungs as well as at them
-npm run nav        # deep links, back/forward, click-to-fly, malformed URLs
+npm run nav        # deep links, back/forward, click-to-fly, pinch, malformed URLs
+npm run marks      # bookmarks survive a reload; and that no words appear on screen
+npm run seams      # vertical anomalies in the ground that no landscape can account for
+npm run pops       # every frame of the whole descent, against how much the zoom accounts for
+npm run relief     # how steep the ground actually gets, rung by rung
+npm run ruins      # finds a town that stands empty and photographs it at three sizes
 ```
 
 `src/core`, `src/camera`, `src/universe` and `src/culture` are pure — no DOM — so the hard maths is
 covered without a browser harness.
 
+## The rim is the surface
+
+A planet here is a **disc seen edge on**, and its surface is its circumference. Nothing lives in the
+middle; a region is an arc of the rim, and zooming into one turns the frame so that arc is horizontal and
+gives you a side-on cross-section of the ground — soil over beds of rock, the sea at its own level, and
+the sky above it at whatever time of day it is where you are standing.
+
+Everything on that ground is an address. The row of roofs on a settlement's horizon is not a decoration
+standing in for houses: they are the settlement's real building slots, drawn at the size and place they
+will be when you arrive, and zooming in resolves them rather than replacing them.
+
+## Rare places
+
+Rarity is a **pure function of address**, which is what makes a rare place worth finding — it is in the
+same place forever, in the same place for everybody, and a link to it stays true. One settlement in a
+hundred and twenty stands empty: no lit windows after dark, no smoke over the roofs, part of the roof
+down and the wall head broken with it, the colour weathered out of the walls, and the world growing back
+in through the doorways.
+
+Nothing marks it. A rare place is not ringed, pinned or sparkled — it looks different because it *is*
+different, and the difference reads from a region away, so it draws the eye without anything being drawn
+that is not the place itself.
+
 ## Status
 
-Working: the full continuous zoom, galaxy morphologies, star systems with ticking orbits, planets as
-cartoon discs, navigation and permalinks, per-planet languages and place cards.
+Working, end to end: the continuous zoom across all eight rungs, ten galaxy morphologies, systems with
+ticking orbits, planets as discs and as ground, climate and biosphere per world, generated languages and
+writing systems, architectural grammar filtered by local climate, settlements and building elevations,
+bookmarks and permalinks, and empty towns.
 
-Not yet: architectural grammar and biospheres per world, and the ground-level art those feed — regions,
-cities and building facades. The deepest three rungs are still placeholder shapes.
+Measured: 42 bits of mantissa headroom at the worst point of the descent, no seams across the sampled
+shots, no pops across the whole dive, and every rung inside a 16 ms p99 frame budget.
 
 ## Licence
 

@@ -5,6 +5,7 @@ import { motifOf } from '../../culture/motif.ts';
 import { scriptOf } from '../../culture/script.ts';
 import { languageOf } from '../../culture/language.ts';
 import { buildingName, cultureOf } from '../../universe/gen/culture.ts';
+import { ruinDecay } from '../../universe/rarity.ts';
 import {
   groundHeightAt,
   isInhabited,
@@ -17,7 +18,7 @@ import {
 } from '../../universe/node.ts';
 import { smoothstep } from '../bands.ts';
 import { atLuminance, css, luminanceOf, shade, solveL } from '../color.ts';
-import { drawFacade, FACADE_MIN_PX, type Facade } from './facade.ts';
+import { drawFacade, FACADE_MIN_PX, ruinOpenRight, wallPath, type Facade } from './facade.ts';
 import { daylight, type Sky } from './sky.ts';
 import { surfaceColours } from './planet.ts';
 
@@ -127,11 +128,21 @@ export function drawStructures(
     culture: cultureOf(g.planetId, g.traits),
   };
 
+  /**
+   * WHETHER ANYONE STILL LIVES HERE, asked of the TOWN and not of the house.
+   *
+   * One settlement in a hundred and twenty stands empty (see universe/rarity.ts), and when the people left they
+   * all left -- so the answer belongs to the settlement and every building on the plate is handed the same one.
+   * That is what makes an empty town read as one abandonment from a region away rather than as a scatter of
+   * derelicts, and it is why the last rung needs `parentId`: a single building filling the screen has to ask its
+   * settlement, or it would light its windows again at the moment you arrived.
+   */
   if (node.kind === 'building') {
     if (!isInhabited(node)) return;
-    building(ctx, cx, cy, r, node, node, 0, 0.72, detail, sky, climate, ore, world, 1);
+    building(ctx, cx, cy, r, node, node, 0, 0.72, detail, sky, climate, ore, world, ruinDecay(node.parentId), 1);
     return;
   }
+  const hostRuin = node.kind === 'settlement' ? ruinDecay(node.id) : 0;
 
   for (const ref of rimChildren(node)) {
     // Off the edge of the window is off the edge of the work: a plate can be six screens wide.
@@ -140,11 +151,11 @@ export function drawStructures(
     if (!isInhabited(child)) continue;
 
     if (ref.kind === 'building') {
-      building(ctx, cx, cy, r, node, child, ref.ox, ref.rel * 0.72, detail, sky, climate, ore, world, 1);
+      building(ctx, cx, cy, r, node, child, ref.ox, ref.rel * 0.72, detail, sky, climate, ore, world, hostRuin, 1);
       continue;
     }
 
-    town(ctx, cx, cy, r, node, child, ref, detail, sky, climate, ore, world);
+    town(ctx, cx, cy, r, node, child, ref, detail, sky, climate, ore, world, ruinDecay(child.id));
   }
 }
 
@@ -179,6 +190,7 @@ function town(
   climate: LocalClimate,
   ore: { hue: number; metallicity: number },
   world: World,
+  ruin: number,
 ): void {
   const slots = rimCells(child);
   if (slots === 0) return;
@@ -199,7 +211,7 @@ function town(
     if (u < -1.1 || u > 1.1) continue;
     const alpha = i % coarse === 0 ? 1 : newcomer;
     if (alpha < 0.02) continue;
-    building(ctx, cx, cy, r, host, child, u, half, detail, sky, climate, ore, world, alpha, id);
+    building(ctx, cx, cy, r, host, child, u, half, detail, sky, climate, ore, world, ruin, alpha, id);
   }
 }
 
@@ -226,6 +238,7 @@ function building(
   climate: LocalClimate,
   ore: { hue: number; metallicity: number },
   world: World,
+  ruin: number,
   crowdAlpha = 1,
   addrId = addr.id,
 ): void {
@@ -306,19 +319,36 @@ function building(
     const height = Math.min(half * 2 * MAX_ASPECT, r * BUILDING_TOP, storeyH * look.storeys);
     const rise = half * arch.pitch;
 
-    ctx.fillStyle = css(wall);
-    ctx.fillRect(x - half, groundY - height, half * 2, height);
-    ctx.fillStyle = css(shade(wall, shadowHue, 1.1));
+    /**
+     * THE BLOCK AND THE ELEVATION ARE THE SAME MASS, ruin included.
+     *
+     * `wallPath` is the elevation's own silhouette, imported rather than reproduced, because the two drawings are
+     * crossfaded over a third of a doubling -- so a rectangle here against a broken head there would have a ruin
+     * grow its roofline back as you approached and lose it again as you arrived. The roof is cut to the same
+     * fraction, off the same end, from the same `ruinOpenRight`.
+     */
+    const worn = ruin > 0 ? { h: wall.h, s: wall.s * (1 - 0.62 * ruin), l: wall.l * (1 - 0.1 * ruin) } : wall;
+    ctx.fillStyle = css(worn);
     ctx.beginPath();
-    ctx.moveTo(x - half - half * arch.eave, groundY - height);
+    wallPath(ctx, x, groundY, groundY - height, half, ruin, id);
+    ctx.fill();
+    const kept = 1 - 0.55 * ruin;
+    const openRight = ruinOpenRight(id);
+    const eaveL = x - half - half * arch.eave;
+    const eaveR = x + half + half * arch.eave;
+    const stop = openRight ? eaveL + (eaveR - eaveL) * kept : eaveR - (eaveR - eaveL) * kept;
+    ctx.fillStyle = css(shade(worn, shadowHue, 1.1));
+    ctx.beginPath();
+    ctx.moveTo(openRight ? eaveL : eaveR, groundY - height);
     ctx.lineTo(x, groundY - height - rise);
-    ctx.lineTo(x + half + half * arch.eave, groundY - height);
+    // Past the ridge the covering has gone, so the far slope stops where the roof stops.
+    if ((openRight && stop > x) || (!openRight && stop < x)) ctx.lineTo(stop, groundY - height);
     ctx.closePath();
     ctx.fill();
 
     if (half * 2 > 9) {
       // One window band, lit after dark. At this size a lit window is the only thing that says "someone is in".
-      const lit = sky.night > 0.3 && f01(hash2(id, 0x74)) < 0.6 * sky.night;
+      const lit = ruin <= 0 && sky.night > 0.3 && f01(hash2(id, 0x74)) < 0.6 * sky.night;
       const w = Math.max(1, half * 0.3);
       ctx.fillStyle = css(
         lit
@@ -331,11 +361,12 @@ function building(
       ctx.strokeStyle = css(daylight(atLuminance(s.coast, Math.max(0.04, luminanceOf(s.coast))), sky, shadowHue));
       ctx.lineWidth = Math.min(2.2, Math.max(0.8, half * 0.09));
       ctx.beginPath();
-      ctx.moveTo(x - half, groundY);
-      ctx.lineTo(x - half, groundY - height);
+      wallPath(ctx, x, groundY, groundY - height, half, ruin, id);
+      ctx.stroke();
+      ctx.beginPath();
+      ctx.moveTo(openRight ? x - half : x + half, groundY - height);
       ctx.lineTo(x, groundY - height - rise);
-      ctx.lineTo(x + half, groundY - height);
-      ctx.lineTo(x + half, groundY);
+      if ((openRight && stop > x) || (!openRight && stop < x)) ctx.lineTo(Math.max(x - half, Math.min(x + half, stop)), groundY - height);
       ctx.stroke();
     }
   }
@@ -355,6 +386,7 @@ function building(
       oreHue: ore.hue,
       metallicity: ore.metallicity,
       civic: look.roof === arch.roofCivic && arch.roofCivic !== arch.roof,
+      ruin,
       maxHeight: Math.min(half * 2 * MAX_ASPECT, r * BUILDING_TOP),
       id,
       planetId: g.planetId,

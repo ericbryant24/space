@@ -8,6 +8,7 @@ import type { Node } from '../src/universe/node.ts';
 const nodeOf = (kind: Node['kind']): Node => ({
   kind,
   id: 12345,
+  parentId: 0,
   logSpan: LEVELS[kind].logSpan,
   path: [],
   ground: null,
