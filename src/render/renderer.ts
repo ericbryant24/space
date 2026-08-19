@@ -53,8 +53,14 @@ const MIN_CHILD_PX = 1.1;
 export const ANCESTOR_LIMIT_DIAGONALS = 64;
 /** Past this the node's own silhouette is off-screen anyway; iterate its children but skip its disc. */
 export const MAX_SELF_DRAW_DIAGONALS = 2.5;
-/** And how far past it the fade runs, for everything that is allowed to fade rather than switch. */
-const SELF_FADE_SPAN = 1.6;
+/**
+ * And how far past it the fade runs, for everything that is allowed to fade rather than switch.
+ *
+ * Three, which is a doubling and a half of zoom -- six notches of wheel. At 1.6 the whole fade happened inside
+ * two thirds of a doubling, and a full-screen wash losing three quarters of itself in two notches is not a
+ * crossfade, it is a slower pop: the detector still called it out, just with a smaller number.
+ */
+const SELF_FADE_SPAN = 3;
 /**
  * A planet keeps drawing its own body long past the general limit, because that is what paints the ground until its
  * regions take over -- and the two have to meet exactly.
