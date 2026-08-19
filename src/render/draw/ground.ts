@@ -72,6 +72,7 @@ const LAYER_SKIN = 2;
 const LAYER_SEA = 3;
 const LAYER_SHALLOW = 4;
 const LAYER_INK = 5;
+const LAYER_COUNT = 6;
 
 /** Concentric steps down through a planet's interior. Three, because three flat steps read as depth. */
 const INTERIOR_BANDS = 3;
@@ -272,29 +273,43 @@ export function drawSurfacePlate(
   const bleed = (layer: number) => ((layer + 1) * LAYER_BLEED_PX) / Math.max(1e-9, r);
 
   /**
-   * The ground line across the plate at `drop` below it, bled out to one layer's reach at both ends, as screen
-   * points. The bled ends are SAMPLED rather than carried sideways from the last point: extending flat would put
-   * a notch in the neighbour's finished ground wherever the slope is steep, which is the same defect in a hat.
+   * The ground line in screen points, ONCE, plus one pair of bled ends per layer.
+   *
+   * Every fill on the plate traces the same line -- the layers differ only in how far below it they sit and how
+   * far past the plate they run. Building a fresh array of screen points for each was fourteen allocations and
+   * twenty-eight terrain samples per plate, sixty plates deep in a settlement, and it showed: the surface rungs
+   * went from eight milliseconds to twelve. The interior points are shared, the `drop` is added as the path is
+   * traced, and only the two bled ends are sampled per layer. The bled ends are SAMPLED rather than carried
+   * sideways from the last point: extending flat would put a notch in the neighbour's finished ground wherever
+   * the slope is steep, which is the same defect in a hat.
+   *
+   * Index -1 is the left bled end, 0 .. samples-1 the shared interior, and `samples` the right one.
    */
-  const strip = (layer: number, drop: number): Float64Array => {
-    const b = bleed(layer);
-    const out = new Float64Array((samples + 2) * 2);
+  const pts = new Float64Array(samples * 2);
+  for (let i = 0; i < samples; i++) {
+    pts[i * 2] = toX(line[i * 2]!);
+    pts[i * 2 + 1] = toY(line[i * 2 + 1]!);
+  }
+  const endX = new Float64Array(LAYER_COUNT * 2);
+  const endY = new Float64Array(LAYER_COUNT * 2);
+  for (let k = 0; k < LAYER_COUNT; k++) {
+    const b = bleed(k);
+    endX[k * 2] = toX(from - b);
+    endY[k * 2] = toY(groundHeightAt(g, from - b, detail));
+    endX[k * 2 + 1] = toX(to + b);
+    endY[k * 2 + 1] = toY(groundHeightAt(g, to + b, detail));
+  }
+  const atX = (layer: number, i: number) =>
+    i < 0 ? endX[layer * 2]! : i >= samples ? endX[layer * 2 + 1]! : pts[i * 2]!;
+  const atY = (layer: number, i: number, dy: number) =>
+    (i < 0 ? endY[layer * 2]! : i >= samples ? endY[layer * 2 + 1]! : pts[i * 2 + 1]!) + dy;
+  const forwards = (layer: number, drop: number, a = -1, b = samples): void => {
     const dy = drop * r;
-    out[0] = toX(from - b);
-    out[1] = toY(groundHeightAt(g, from - b, detail)) + dy;
-    for (let i = 0; i < samples; i++) {
-      out[(i + 1) * 2] = toX(line[i * 2]!);
-      out[(i + 1) * 2 + 1] = toY(line[i * 2 + 1]!) + dy;
-    }
-    out[(samples + 1) * 2] = toX(to + b);
-    out[(samples + 1) * 2 + 1] = toY(groundHeightAt(g, to + b, detail)) + dy;
-    return out;
+    for (let i = a; i <= b; i++) ctx.lineTo(atX(layer, i), atY(layer, i, dy));
   };
-  const forwards = (p: Float64Array, a = 0, b = samples + 1): void => {
-    for (let i = a; i <= b; i++) ctx.lineTo(p[i * 2]!, p[i * 2 + 1]!);
-  };
-  const backwards = (p: Float64Array, a = 0, b = samples + 1): void => {
-    for (let i = b; i >= a; i--) ctx.lineTo(p[i * 2]!, p[i * 2 + 1]!);
+  const backwards = (layer: number, drop: number, a = -1, b = samples): void => {
+    const dy = drop * r;
+    for (let i = b; i >= a; i--) ctx.lineTo(atX(layer, i), atY(layer, i, dy));
   };
 
   /**
@@ -312,11 +327,10 @@ export function drawSurfacePlate(
 
   /** A path bounded above by the ground line and below by the plate's reach: everything solid. */
   const rockPath = (): void => {
-    const p = strip(LAYER_ROCK, 0);
     ctx.beginPath();
-    ctx.moveTo(p[0]!, toY(-reach));
-    forwards(p);
-    ctx.lineTo(p[(samples + 1) * 2]!, toY(-reach));
+    ctx.moveTo(atX(LAYER_ROCK, -1), toY(-reach));
+    forwards(LAYER_ROCK, 0);
+    ctx.lineTo(atX(LAYER_ROCK, samples), toY(-reach));
     ctx.closePath();
   };
 
@@ -354,8 +368,8 @@ export function drawSurfacePlate(
     // downwards, exactly as a geometric family must, and the picture reads as layers rather than as ruled lines.
     const bottom = Math.min(reach + 1, top * 2);
     ctx.beginPath();
-    forwards(strip(LAYER_BEDS, top));
-    backwards(strip(LAYER_BEDS, bottom));
+    forwards(LAYER_BEDS, top);
+    backwards(LAYER_BEDS, bottom);
     ctx.closePath();
     // OPAQUE, with the fade in the colour rather than in the alpha. A translucent fill laid twice over the same
     // ground -- which is what the overlap between two plates is -- does not match one laid once, so it seams. See
@@ -387,18 +401,16 @@ export function drawSurfacePlate(
     (i) => g.baseRadius + line[i * 2 + 1]! * g.span,
     beachDepth(g.traits, r, metresPerUnit) * g.span,
   );
-  const skinTop = strip(LAYER_SKIN, 0);
-  const skinBase = strip(LAYER_SKIN, depth);
   for (const run of runs) {
     /**
      * Only the ends of the PLATE bleed. A boundary between two materials inside it is a real edge -- a snow line,
      * the top of a beach -- and the one kind of edge in this painter that is allowed to be visible.
      */
-    const a = run.from === 0 ? 0 : run.from + 1;
-    const b = run.to === samples - 1 ? samples + 1 : run.to + 1;
+    const a = run.from === 0 ? -1 : run.from;
+    const b = run.to === samples - 1 ? samples : run.to;
     ctx.beginPath();
-    forwards(skinTop, a, b);
-    backwards(skinBase, a, b);
+    forwards(LAYER_SKIN, 0, a, b);
+    backwards(LAYER_SKIN, depth, a, b);
     ctx.closePath();
     ctx.fillStyle = css(daylight(materialTone(run.material, run.biome, s, g.traits, ore), sky, shadowHue));
     ctx.fill();
@@ -418,21 +430,23 @@ export function drawSurfacePlate(
   if (wet) {
     const seaTone = daylight(s.sea, sky, shadowHue);
     const seaY = toY(sea);
-    const bed = strip(LAYER_SEA, 0);
     ctx.beginPath();
-    ctx.moveTo(toX(from - bleed(LAYER_SEA)), seaY);
-    ctx.lineTo(toX(to + bleed(LAYER_SEA)), seaY);
-    for (let i = samples + 1; i >= 0; i--) ctx.lineTo(bed[i * 2]!, Math.max(seaY, bed[i * 2 + 1]!));
+    ctx.moveTo(atX(LAYER_SEA, -1), seaY);
+    ctx.lineTo(atX(LAYER_SEA, samples), seaY);
+    for (let i = samples; i >= -1; i--) ctx.lineTo(atX(LAYER_SEA, i), Math.max(seaY, atY(LAYER_SEA, i, 0)));
     ctx.closePath();
     ctx.fillStyle = css(seaTone);
     ctx.fill();
 
     const shallow = Math.max(2 / r, depth * 2.2);
-    const floor = strip(LAYER_SHALLOW, 0);
-    const shelf = strip(LAYER_SHALLOW, -shallow);
+    const lift = -shallow * r;
     ctx.beginPath();
-    for (let i = 0; i <= samples + 1; i++) ctx.lineTo(floor[i * 2]!, Math.max(seaY, floor[i * 2 + 1]!));
-    for (let i = samples + 1; i >= 0; i--) ctx.lineTo(shelf[i * 2]!, Math.max(seaY, shelf[i * 2 + 1]!));
+    for (let i = -1; i <= samples; i++) {
+      ctx.lineTo(atX(LAYER_SHALLOW, i), Math.max(seaY, atY(LAYER_SHALLOW, i, 0)));
+    }
+    for (let i = samples; i >= -1; i--) {
+      ctx.lineTo(atX(LAYER_SHALLOW, i), Math.max(seaY, atY(LAYER_SHALLOW, i, 0) + lift));
+    }
     ctx.closePath();
     ctx.fillStyle = css(atLuminance(seaTone, Math.min(0.72, luminanceOf(seaTone) + 0.16)));
     ctx.fill();
@@ -453,10 +467,9 @@ export function drawSurfacePlate(
    * and the coastline disappeared from the world. The disc does use the ramp, and the two agree, because at the
    * moment the disc hands over it is several screens across and the ramp has long since saturated.
    */
-  const inkLine = strip(LAYER_INK, 0);
   ctx.beginPath();
-  ctx.moveTo(inkLine[0]!, inkLine[1]!);
-  forwards(inkLine, 1);
+  ctx.moveTo(atX(LAYER_INK, -1), atY(LAYER_INK, -1, 0));
+  forwards(LAYER_INK, 0, 0);
   ctx.lineWidth = GROUND_INK_PX;
   ctx.strokeStyle = css(daylight(s.coast, sky, shadowHue));
   ctx.stroke();
